@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      # Прайс и FAQ правятся без пересборки образа.
+      - ./content:/app/content:ro
+      - bot-data:/app/data
+    environment:
+      DB_PATH: /app/data/bot.sqlite3
+
+volumes:
+  bot-data:
