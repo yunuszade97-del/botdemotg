@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from app.bot.factory import create_bot
-from app.config import Settings, get_settings
+from app.config import BASE_DIR, Settings, get_settings
+from app.core.profile import available_profiles
 from app.core.llm_client import LLMClient, LLMError
 from app.core.tools import SAVE_LEAD_TOOL_NAME, TOOLS
 from app.db.crud import Repository
@@ -209,6 +210,34 @@ async def check_lead_webhook(settings: Settings) -> CheckResult:
     )
 
 
+async def check_profile(settings: Settings) -> CheckResult:
+    """Профиль ниши. Тихо уехавший на чужой прайс бот выглядит рабочим."""
+    if not settings.profile:
+        known = ", ".join(available_profiles(BASE_DIR)) or "нет"
+        return CheckResult(
+            "Профиль ниши",
+            WARN,
+            f"PROFILE не задан, поля берутся из COMPANY_* — "
+            f"компания «{settings.company_name}». Готовые ниши: {known}",
+        )
+    profile = settings.business_profile
+    if profile is None:  # pragma: no cover - check_config уже упал бы
+        return CheckResult("Профиль ниши", FAIL, f"{settings.profile!r} не загрузился")
+    if not profile.qualify:
+        return CheckResult(
+            "Профиль ниши",
+            WARN,
+            f"{profile.slug}: {profile.name} — но список qualify пуст, "
+            f"бот будет квалифицировать по общей схеме",
+        )
+    return CheckResult(
+        "Профиль ниши",
+        OK,
+        f"{profile.slug}: {profile.name} — {profile.business}, "
+        f"{len(profile.qualify)} вопросов квалификации",
+    )
+
+
 async def check_knowledge(settings: Settings) -> CheckResult:
     knowledge = settings.knowledge_base()
     if not knowledge:
@@ -217,6 +246,20 @@ async def check_knowledge(settings: Settings) -> CheckResult:
             WARN,
             f"{settings.knowledge_file} пуст или не найден — "
             f"бот не сможет называть цены и условия",
+        )
+    # Шаблон из репозитория состоит из заголовков и html-комментариев: бот на нём
+    # формально работает, но клиенту рассказать нечего.
+    meaningful = [
+        line
+        for line in knowledge.splitlines()
+        if line.strip() and not line.lstrip().startswith(("#", ">", "<!--"))
+    ]
+    if len(meaningful) < 5:
+        return CheckResult(
+            "База знаний",
+            WARN,
+            f"{settings.knowledge_file} выглядит незаполненным шаблоном — "
+            f"впишите прайс, условия и FAQ",
         )
     return CheckResult(
         "База знаний", OK, f"{settings.knowledge_file}, {len(knowledge)} символов"
@@ -230,6 +273,7 @@ async def run_checks() -> list[CheckResult]:
         return results
 
     results.append(await check_database(settings))
+    results.append(await check_profile(settings))
     results.append(await check_knowledge(settings))
     results.append(await check_lead_webhook(settings))
 

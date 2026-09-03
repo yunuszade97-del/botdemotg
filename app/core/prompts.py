@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 SYSTEM_PROMPT_TEMPLATE = """\
 Ты — {company_name}, опытный менеджер по продажам. Направление: {company_business}.{city_line}
 Часы работы: {working_hours}.
@@ -25,7 +27,7 @@ SYSTEM_PROMPT_TEMPLATE = """\
 # Логика диалога
 1. Ответь на вопрос клиента по сути, опираясь на блок «База знаний» ниже.
 2. Сразу задай следующий уточняющий вопрос, чтобы закрыть недостающие поля заявки:
-   имя → что именно нужно → сроки/даты → бюджет (если уместно) → контакт.
+   имя → что именно нужно → сроки/даты → бюджет (если уместно) → контакт.{qualify_block}
 3. Контакт проси в конце, когда клиент уже получил пользу от разговора.
    Предпочтительный способ — вызвать инструмент `request_phone_button`: он покажет клиенту кнопку «Отправить мой номер», и номер придёт подтверждённым от Telegram. Если клиент кнопку проигнорировал или хочет дать другой контакт — прими текстом, не настаивай.
 4. Как только известны имя, контакт, сроки и суть запроса — немедленно вызови \
@@ -51,10 +53,31 @@ SYSTEM_PROMPT_TEMPLATE = """\
 {knowledge_base}
 """
 
+# Ниша задаёт свой набор вопросов: «сколько человек» для экскурсии и «стаж
+# вождения» для проката — это разные заявки. Список приходит из профиля
+# (`profiles/<name>.toml`, ключ `qualify`) и вклеивается в логику диалога.
+_QUALIFY_TEMPLATE = """
+
+# Что важно выяснить именно в этой нише
+Без этих пунктов менеджер не сможет работать с заявкой. Спрашивай их по одному \
+и перенеси ответы в `service_details`:
+{items}
+Если клиент готов оставить контакт раньше — сохраняй заявку сразу, не удерживая \
+его ради этих полей. Лид важнее полноты анкеты."""
+
+
 _NO_KNOWLEDGE = """\
 (База знаний не заполнена. Отвечай общими фразами о направлении компании, \
 не называй конкретных цен и наличия, и как можно раньше переводи разговор \
 на заявку, чтобы менеджер связался и уточнил детали.)"""
+
+
+def build_qualify_block(qualify_fields: Sequence[str]) -> str:
+    """Блок «что выяснить» для конкретной ниши. Пустой список — пустой блок."""
+    items = [item.strip() for item in qualify_fields if item.strip()]
+    if not items:
+        return ""
+    return _QUALIFY_TEMPLATE.format(items="\n".join(f"- {item}" for item in items))
 
 
 def build_system_prompt(
@@ -64,6 +87,7 @@ def build_system_prompt(
     company_city: str,
     working_hours: str,
     knowledge_base: str,
+    qualify_fields: Sequence[str] = (),
 ) -> str:
     return SYSTEM_PROMPT_TEMPLATE.format(
         company_name=company_name,
@@ -71,6 +95,7 @@ def build_system_prompt(
         city_line=f" Город: {company_city}." if company_city else "",
         working_hours=working_hours,
         knowledge_base=knowledge_base.strip() or _NO_KNOWLEDGE,
+        qualify_block=build_qualify_block(qualify_fields),
     )
 
 

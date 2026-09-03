@@ -78,6 +78,7 @@ class ConversationService:
             company_city=settings.company_city,
             working_hours=settings.working_hours,
             knowledge_base=settings.knowledge_base(),
+            qualify_fields=settings.qualify_fields,
         )
         # Один диалог обрабатывается строго последовательно: без этого три
         # сообщения подряд дают три параллельных прохода и перемешанную историю.

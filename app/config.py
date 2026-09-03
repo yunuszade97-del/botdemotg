@@ -6,8 +6,10 @@ import functools
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.core.profile import BusinessProfile, ProfileError, load_profile
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -106,19 +108,11 @@ class Settings(BaseSettings):
     retention_days_leads: int = Field(default=365, ge=0)
     retention_cleanup_hours: int = Field(default=24, ge=1)
 
-    # --- Дневные лимиты расходов на LLM -------------------------------------
-    # Троттлинг ограничивает частоту, но не общий объём: 15 сообщений в минуту
-    # это 21600 платных вызовов в сутки с одного аккаунта.
-    daily_llm_calls_per_user: int = Field(default=60, ge=0)
-    daily_llm_calls_global: int = Field(default=3000, ge=0)
-
-    # --- Хранение персональных данных ---------------------------------------
-    # 0 — не удалять никогда.
-    retention_days_messages: int = Field(default=30, ge=0)
-    retention_days_leads: int = Field(default=365, ge=0)
-    retention_interval_hours: int = Field(default=24, ge=1)
-
     # --- Профиль бизнеса (подставляется в системный промпт) -----------------
+    # PROFILE=<имя файла из profiles/> заполняет весь блок ниже разом.
+    # Отдельная переменная COMPANY_* / KNOWLEDGE_FILE / WELCOME_MESSAGE в .env
+    # перебивает профиль: один шаблон ниши — много клиентов в разных городах.
+    profile: str = ""
     company_name: str = "Наша компания"
     company_business: str = "аренда автомобилей"
     company_city: str = ""
@@ -129,6 +123,45 @@ class Settings(BaseSettings):
 
     # --- Логирование --------------------------------------------------------
     log_level: str = "INFO"
+
+    _profile: BusinessProfile | None = PrivateAttr(default=None)
+
+    def model_post_init(self, __context: object) -> None:
+        """Разворачивает PROFILE в поля бизнес-блока.
+
+        Явно заданные переменные окружения приоритетнее профиля, поэтому
+        сначала запоминаем, что пришло из .env, и заполняем только остальное.
+        """
+        if not self.profile:
+            return
+        loaded = load_profile(self.profile, base_dir=BASE_DIR)
+        explicit = set(self.model_fields_set)
+        for field, value in (
+            ("company_name", loaded.name),
+            ("company_business", loaded.business),
+            ("company_city", loaded.city),
+            ("working_hours", loaded.working_hours),
+            ("manager_response_time", loaded.response_time),
+            ("knowledge_file", loaded.knowledge_file),
+            ("welcome_message", loaded.welcome),
+        ):
+            # Пустая переменная в .env (`WELCOME_MESSAGE=`) для pydantic всё равно
+            # «задана». Считать её перекрытием — значит молча стереть приветствие
+            # профиля строкой, которую никто не писал осознанно.
+            if field in explicit and str(getattr(self, field)).strip() not in {"", "."}:
+                continue
+            setattr(self, field, value)
+        self._profile = loaded
+
+    @property
+    def business_profile(self) -> BusinessProfile | None:
+        """Загруженный профиль ниши либо None, если PROFILE не задан."""
+        return self._profile
+
+    @property
+    def qualify_fields(self) -> tuple[str, ...]:
+        """Что обязательно выяснить в этой нише. Пусто — общая схема промпта."""
+        return self._profile.qualify if self._profile else ()
 
     @field_validator("llm_base_url", "webhook_base_url", "lead_webhook_url")
     @classmethod
@@ -184,6 +217,8 @@ class Settings(BaseSettings):
     def validate_runtime(self) -> None:
         """Проверки, которые нельзя выразить в аннотациях полей."""
         self.admin_ids  # noqa: B018 - бросит ValueError при некорректном значении
+        if self.profile and self._profile is None:  # pragma: no cover - страховка
+            raise ProfileError(f"профиль {self.profile!r} не загрузился")
         if self.use_webhook and not self.webhook_base_url:
             raise ValueError("USE_WEBHOOK=true требует заполненного WEBHOOK_BASE_URL")
         if self.use_webhook and not self.webhook_base_url.startswith("https://"):

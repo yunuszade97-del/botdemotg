@@ -14,6 +14,18 @@ from app.db.database import Database
 from app.db.models import Lead
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _ignore_dotenv() -> None:
+    """Отвязывает тесты от .env разработчика.
+
+    Settings читает .env как источник более низкого приоритета, поэтому любое
+    поле, не переданное в конструктор явно, приезжает из личного файла. Набор
+    начинает вести себя по-разному локально и в CI, где .env нет, — и зелёные
+    тесты перестают что-либо доказывать.
+    """
+    Settings.model_config["env_file"] = None
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
