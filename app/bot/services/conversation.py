@@ -12,6 +12,7 @@ from typing import Any, Coroutine
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.bot.services.lead_webhook import LeadWebhookSender
 from app.bot.services.notifier import AdminNotifier
 from app.core.llm_client import LLMClient, LLMError, ToolCall
 from app.core.prompts import (
@@ -64,11 +65,13 @@ class ConversationService:
         repo: Repository,
         llm: LLMClient,
         notifier: AdminNotifier,
+        lead_webhook: LeadWebhookSender | None = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._llm = llm
         self._notifier = notifier
+        self._lead_webhook = lead_webhook
         self._system_prompt = build_system_prompt(
             company_name=settings.company_name,
             company_business=settings.company_business,
@@ -289,7 +292,11 @@ class ConversationService:
 
         # Уведомление админа не должно задерживать ответ клиенту, но и потеряться
         # молча не может: при сбое лид останется в очереди недоставленных.
+        # Обе доставки — фоном и независимо друг от друга: упавшая внешняя
+        # система не должна задерживать уведомление менеджеру, и наоборот.
         self._spawn(self._notifier.notify(lead))
+        if self._lead_webhook is not None and self._lead_webhook.enabled:
+            self._spawn(self._lead_webhook.send(lead))
 
         return ToolOutcome(
             payload={

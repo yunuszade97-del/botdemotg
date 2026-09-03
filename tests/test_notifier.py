@@ -18,6 +18,7 @@ def _lead(**overrides) -> Lead:
         budget="до 100 GEL",
         summary="Кроссовер на неделю",
         admin_notified=False,
+        webhook_delivered=False,
         created_at="2026-09-03T12:00:00+00:00",
     )
     base.update(overrides)

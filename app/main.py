@@ -52,7 +52,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     repo = Repository(database)
 
     bot = create_bot(settings)
-    llm, notifier, conversation = build_services(settings=settings, bot=bot, repo=repo)
+    llm, notifier, lead_webhook, conversation = build_services(
+        settings=settings, bot=bot, repo=repo
+    )
     dispatcher = create_dispatcher(settings=settings, repo=repo, conversation=conversation)
 
     app.state.settings = settings
@@ -71,6 +73,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Лиды, о которых админ не узнал из-за прошлого сбоя, досылаем на старте.
     with contextlib.suppress(Exception):
         await notifier.flush_pending()
+    if lead_webhook.enabled:
+        logger.info("Выгрузка лидов включена: %s", settings.lead_webhook_url)
+        with contextlib.suppress(Exception):
+            await lead_webhook.flush_pending()
 
     retention_task = asyncio.create_task(
         _retention_loop(repo, settings), name="retention-cleanup"
@@ -110,6 +116,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with contextlib.suppress(Exception):
                 await bot.delete_webhook()
         await llm.close()
+        await lead_webhook.close()
         await bot.session.close()
         await database.close()
         logger.info("Остановка завершена")

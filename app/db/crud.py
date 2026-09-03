@@ -189,6 +189,22 @@ class Repository:
         )
         await self._db.connection.commit()
 
+    async def mark_lead_webhook_sent(self, lead_id: int) -> None:
+        await self._db.connection.execute(
+            "UPDATE leads SET webhook_delivered = 1 WHERE id = ?", (lead_id,)
+        )
+        await self._db.connection.commit()
+
+    async def list_pending_webhooks(self, limit: int = 50) -> list[Lead]:
+        """Лиды, не доставленные во внешнюю систему (сбой сети/рестарт)."""
+        cursor = await self._db.connection.execute(
+            "SELECT * FROM leads WHERE webhook_delivered = 0 ORDER BY id ASC LIMIT ?",
+            (limit,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [Lead.from_row(row) for row in rows]
+
     async def list_pending_notifications(self, limit: int = 50) -> list[Lead]:
         """Лиды, о которых админ ещё не оповещён (падение сети/рестарт)."""
         cursor = await self._db.connection.execute(

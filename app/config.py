@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     daily_llm_calls_per_user: int = Field(default=60, ge=0)
     daily_llm_calls_global: int = Field(default=3_000, ge=0)
 
+    # --- Выгрузка лида во внешнюю систему -----------------------------------
+    # Пусто — выгрузка выключена, лиды приходят только в Telegram.
+    # Адрес приёмника: Make / Zapier / n8n / Apps Script / свой бэкенд.
+    lead_webhook_url: str = ""
+    lead_webhook_secret: str = ""
+    lead_webhook_timeout: float = Field(default=10.0, gt=0)
+
     # --- Дедупликация лидов -------------------------------------------------
     lead_dedup_window_minutes: int = Field(default=180, ge=0)
 
@@ -113,7 +120,7 @@ class Settings(BaseSettings):
     # --- Логирование --------------------------------------------------------
     log_level: str = "INFO"
 
-    @field_validator("llm_base_url", "webhook_base_url")
+    @field_validator("llm_base_url", "webhook_base_url", "lead_webhook_url")
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:
         return value.rstrip("/")
@@ -171,6 +178,10 @@ class Settings(BaseSettings):
             raise ValueError("USE_WEBHOOK=true требует заполненного WEBHOOK_BASE_URL")
         if self.use_webhook and not self.webhook_base_url.startswith("https://"):
             raise ValueError("Telegram принимает вебхуки только по https")
+        if self.lead_webhook_url and not self.lead_webhook_url.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("LEAD_WEBHOOK_URL должен начинаться с http:// или https://")
 
 
 @functools.lru_cache(maxsize=1)

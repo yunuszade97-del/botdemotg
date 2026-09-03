@@ -17,6 +17,7 @@ from app.bot.middlewares import (
     ThrottlingMiddleware,
 )
 from app.bot.services.conversation import ConversationService
+from app.bot.services.lead_webhook import LeadWebhookSender
 from app.bot.services.notifier import AdminNotifier
 from app.config import Settings
 from app.core.llm_client import LLMClient
@@ -73,7 +74,7 @@ def create_dispatcher(
 
 def build_services(
     *, settings: Settings, bot: Bot, repo: Repository
-) -> tuple[LLMClient, AdminNotifier, ConversationService]:
+) -> tuple[LLMClient, AdminNotifier, LeadWebhookSender, ConversationService]:
     llm = LLMClient(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
@@ -84,10 +85,21 @@ def build_services(
         max_retries=settings.llm_max_retries,
     )
     notifier = AdminNotifier(bot=bot, repo=repo, admin_ids=settings.admin_ids)
-    conversation = ConversationService(
-        settings=settings, repo=repo, llm=llm, notifier=notifier
+    lead_webhook = LeadWebhookSender(
+        url=settings.lead_webhook_url,
+        secret=settings.lead_webhook_secret,
+        company=settings.company_name,
+        timeout=settings.lead_webhook_timeout,
+        repo=repo,
     )
-    return llm, notifier, conversation
+    conversation = ConversationService(
+        settings=settings,
+        repo=repo,
+        llm=llm,
+        notifier=notifier,
+        lead_webhook=lead_webhook,
+    )
+    return llm, notifier, lead_webhook, conversation
 
 
 async def setup_bot_commands(bot: Bot) -> None:

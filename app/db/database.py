@@ -7,7 +7,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from app.db.models import SCHEMA
+from app.db.models import MIGRATIONS, SCHEMA
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,26 @@ class Database:
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.executescript(SCHEMA)
+        await self._migrate()
         await self._conn.commit()
         logger.info("SQLite готова: %s", self._path)
+
+    async def _migrate(self) -> None:
+        """Добавляет колонки, появившиеся после первого релиза.
+
+        CREATE TABLE IF NOT EXISTS не меняет существующую таблицу, поэтому
+        обновление кода на работающем боте иначе падало бы на первом запросе
+        к новой колонке.
+        """
+        assert self._conn is not None
+        for table, column, ddl in MIGRATIONS:
+            cursor = await self._conn.execute(f"PRAGMA table_info({table})")
+            columns = {row["name"] for row in await cursor.fetchall()}
+            await cursor.close()
+            if column in columns:
+                continue
+            await self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+            logger.info("Миграция: в %s добавлена колонка %s", table, column)
 
     async def close(self) -> None:
         if self._conn is not None:

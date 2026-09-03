@@ -167,6 +167,48 @@ async def check_llm(settings: Settings) -> tuple[CheckResult, CheckResult]:
     return access, tools
 
 
+async def check_lead_webhook(settings: Settings) -> CheckResult:
+    """Дёргает приёмник тестовым лидом: настройка без проверки бесполезна."""
+    if not settings.lead_webhook_url:
+        return CheckResult(
+            "Выгрузка лидов", WARN, "LEAD_WEBHOOK_URL не задан — только Telegram"
+        )
+
+    import httpx
+
+    from app.bot.services.lead_webhook import SIGNATURE_HEADER, sign
+
+    body = json.dumps(
+        {
+            "event": "lead.test",
+            "company": settings.company_name,
+            "lead": {"id": 0, "client_name": "Проверка связи"},
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if settings.lead_webhook_secret:
+        headers[SIGNATURE_HEADER] = sign(body, settings.lead_webhook_secret)
+
+    try:
+        async with httpx.AsyncClient(timeout=settings.lead_webhook_timeout) as client:
+            response = await client.post(
+                settings.lead_webhook_url, content=body, headers=headers
+            )
+    except Exception as exc:  # noqa: BLE001 - показываем причину пользователю
+        return CheckResult("Выгрузка лидов", FAIL, f"приёмник недоступен: {exc}")
+
+    if response.is_success:
+        return CheckResult(
+            "Выгрузка лидов", OK, f"приёмник ответил HTTP {response.status_code}"
+        )
+    return CheckResult(
+        "Выгрузка лидов",
+        FAIL,
+        f"приёмник ответил HTTP {response.status_code} — проверьте LEAD_WEBHOOK_URL",
+    )
+
+
 async def check_knowledge(settings: Settings) -> CheckResult:
     knowledge = settings.knowledge_base()
     if not knowledge:
@@ -189,6 +231,7 @@ async def run_checks() -> list[CheckResult]:
 
     results.append(await check_database(settings))
     results.append(await check_knowledge(settings))
+    results.append(await check_lead_webhook(settings))
 
     token, admins = await check_telegram(settings)
     results.extend([token, admins])
