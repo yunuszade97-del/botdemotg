@@ -10,6 +10,7 @@ from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
 from app.bot.keyboards import contact_keyboard, remove_keyboard
+from app.bot.services.aggregator import MessageAggregator
 from app.bot.services.conversation import ConversationService, TurnContext
 from app.config import Settings
 from app.db.crud import Repository
@@ -92,7 +93,10 @@ async def handle_contact(
 
 
 async def handle_text(
-    message: Message, conversation: ConversationService, settings: Settings
+    message: Message,
+    conversation: ConversationService,
+    settings: Settings,
+    aggregator: MessageAggregator,
 ) -> None:
     text = (message.text or "").strip()
     if not text:
@@ -102,7 +106,13 @@ async def handle_text(
             "Сообщение слишком длинное — сократите, пожалуйста, до главного 🙏"
         )
         return
-    await _respond(message, conversation, text)
+
+    # Ждём, не допишет ли клиент продолжение: люди отправляют имя, телефон
+    # и даты тремя отдельными сообщениями.
+    async def flush(joined: str) -> None:
+        await _respond(message, conversation, joined)
+
+    await aggregator.add(message.chat.id, text, flush)
 
 
 async def handle_unsupported(message: Message) -> None:

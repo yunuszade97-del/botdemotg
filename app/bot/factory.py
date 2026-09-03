@@ -16,6 +16,7 @@ from app.bot.middlewares import (
     LoggingMiddleware,
     ThrottlingMiddleware,
 )
+from app.bot.services.aggregator import MessageAggregator
 from app.bot.services.conversation import ConversationService
 from app.bot.services.lead_webhook import LeadWebhookSender
 from app.bot.services.notifier import AdminNotifier
@@ -45,12 +46,15 @@ def create_dispatcher(
     settings: Settings,
     repo: Repository,
     conversation: ConversationService,
+    aggregator: MessageAggregator | None = None,
 ) -> Dispatcher:
     # workflow_data: aiogram отдаст эти объекты хэндлерам по имени аргумента.
     dispatcher = Dispatcher(
         settings=settings,
         repo=repo,
         conversation=conversation,
+        aggregator=aggregator
+        or MessageAggregator(delay=settings.message_aggregation_delay),
     )
 
     dispatcher.message.middleware(LoggingMiddleware())

@@ -115,6 +115,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if settings.use_webhook:
             with contextlib.suppress(Exception):
                 await bot.delete_webhook()
+        await dispatcher.workflow_data["aggregator"].close()
         await llm.close()
         await lead_webhook.close()
         await bot.session.close()

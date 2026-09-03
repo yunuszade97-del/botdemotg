@@ -16,6 +16,7 @@ from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import Chat, Message, Update, User
 
 from app.bot.factory import create_dispatcher
+from app.bot.services.aggregator import MessageAggregator
 from app.bot.services.conversation import ConversationService
 from app.bot.services.notifier import AdminNotifier
 from app.config import Settings
@@ -65,13 +66,20 @@ def bot(mocked_session: MockedSession) -> Bot:
     return Bot(token="123:TEST", session=mocked_session)
 
 
-def _make_dispatcher(settings: Settings, repo: Repository, bot: Bot, responses):
+def _make_dispatcher(
+    settings: Settings, repo: Repository, bot: Bot, responses, *, aggregation_delay: float = 0.0
+):
     llm = FakeLLM(responses)
     notifier = FakeNotifier()
     conversation = ConversationService(
         settings=settings, repo=repo, llm=llm, notifier=notifier  # type: ignore[arg-type]
     )
-    dispatcher = create_dispatcher(settings=settings, repo=repo, conversation=conversation)
+    dispatcher = create_dispatcher(
+        settings=settings,
+        repo=repo,
+        conversation=conversation,
+        aggregator=MessageAggregator(delay=aggregation_delay),
+    )
     return dispatcher, llm, notifier
 
 

@@ -26,6 +26,9 @@ def settings(tmp_path: Path) -> Settings:
         company_business="аренда авто",
         manager_response_time="5 минут",
         lead_dedup_window_minutes=180,
+        # Склейка сообщений отключена: тесты должны быть детерминированными
+        # и не ждать реальных пауз. Сама склейка проверяется отдельно.
+        message_aggregation_delay=0.0,
     )
 
 
