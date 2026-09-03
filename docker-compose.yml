@@ -11,6 +11,8 @@ services:
       - bot-data:/app/data
     environment:
       DB_PATH: /app/data/bot.sqlite3
+    # Проверка перед запуском:
+    #   docker compose run --rm bot python -m app.preflight
 
 volumes:
   bot-data:

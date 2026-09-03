@@ -1,0 +1,42 @@
+# Запуск бота на VPS без Docker.
+#
+#   sudo cp deploy/leadbot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now leadbot
+#   journalctl -u leadbot -f
+#
+# Путь /opt/leadbot и пользователя leadbot поменяйте под свою машину.
+
+[Unit]
+Description=Telegram lead generation bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=leadbot
+Group=leadbot
+WorkingDirectory=/opt/leadbot
+EnvironmentFile=/opt/leadbot/.env
+ExecStart=/opt/leadbot/.venv/bin/python -m app.main
+
+Restart=always
+RestartSec=5
+# Не даём systemd сдаться после серии перезапусков: провайдер LLM или
+# Telegram могут лежать дольше, чем длится стандартное окно.
+StartLimitIntervalSec=0
+
+# Логи уходят в journald, ротацию он берёт на себя.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=leadbot
+
+# Базовая изоляция процесса.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/leadbot/data
+
+[Install]
+WantedBy=multi-user.target
