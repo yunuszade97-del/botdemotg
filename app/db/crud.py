@@ -16,6 +16,14 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _today() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
+
+def _days_ago(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+
+
 class Repository:
     def __init__(self, db: Database) -> None:
         self._db = db
@@ -201,6 +209,108 @@ class Repository:
         cursor = await self._db.connection.execute(
             "SELECT * FROM leads ORDER BY id DESC LIMIT ?", (limit,)
         )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [Lead.from_row(row) for row in rows]
+
+    # --- суточные лимиты расходов на LLM ------------------------------------
+    async def count_llm_calls_today(self, chat_id: int) -> int:
+        cursor = await self._db.connection.execute(
+            "SELECT llm_calls FROM usage_daily WHERE day = ? AND chat_id = ?",
+            (_today(), chat_id),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row["llm_calls"]) if row else 0
+
+    async def count_llm_calls_today_global(self) -> int:
+        cursor = await self._db.connection.execute(
+            "SELECT COALESCE(SUM(llm_calls), 0) AS total FROM usage_daily WHERE day = ?",
+            (_today(),),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row["total"]) if row else 0
+
+    async def register_llm_call(self, chat_id: int) -> None:
+        await self._db.connection.execute(
+            """
+            INSERT INTO usage_daily (day, chat_id, llm_calls) VALUES (?, ?, 1)
+            ON CONFLICT(day, chat_id) DO UPDATE SET llm_calls = llm_calls + 1
+            """,
+            (_today(), chat_id),
+        )
+        await self._db.connection.commit()
+
+    # --- удаление персональных данных ---------------------------------------
+    async def purge_old_messages(self, days: int) -> int:
+        """Чистит историю старше N дней. 0 — не удалять."""
+        if days <= 0:
+            return 0
+        cursor = await self._db.connection.execute(
+            "DELETE FROM messages WHERE created_at < ?", (_days_ago(days),)
+        )
+        await self._db.connection.commit()
+        return cursor.rowcount or 0
+
+    async def purge_old_leads(self, days: int) -> int:
+        if days <= 0:
+            return 0
+        cursor = await self._db.connection.execute(
+            "DELETE FROM leads WHERE created_at < ?", (_days_ago(days),)
+        )
+        await self._db.connection.commit()
+        return cursor.rowcount or 0
+
+    async def purge_old_usage(self, days: int = 30) -> int:
+        threshold = (datetime.now(timezone.utc) - timedelta(days=days)).date().isoformat()
+        cursor = await self._db.connection.execute(
+            "DELETE FROM usage_daily WHERE day < ?", (threshold,)
+        )
+        await self._db.connection.commit()
+        return cursor.rowcount or 0
+
+    async def forget_chat(self, chat_id: int) -> tuple[int, int]:
+        """Полностью удаляет данные одного пользователя (запрос на удаление ПД).
+
+        Возвращает (удалено сообщений, удалено заявок).
+        """
+        conn = self._db.connection
+        cursor = await conn.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+        messages = cursor.rowcount or 0
+        cursor = await conn.execute("DELETE FROM leads WHERE chat_id = ?", (chat_id,))
+        leads = cursor.rowcount or 0
+        await conn.execute("DELETE FROM usage_daily WHERE chat_id = ?", (chat_id,))
+        await conn.execute("DELETE FROM users WHERE chat_id = ?", (chat_id,))
+        await conn.commit()
+        return messages, leads
+
+    # --- аналитика ----------------------------------------------------------
+    async def count_users(self) -> int:
+        cursor = await self._db.connection.execute("SELECT COUNT(*) AS c FROM users")
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row["c"]) if row else 0
+
+    async def count_dialogs(self) -> int:
+        """Чаты, в которых был хотя бы один обмен репликами."""
+        cursor = await self._db.connection.execute(
+            "SELECT COUNT(DISTINCT chat_id) AS c FROM messages"
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row["c"]) if row else 0
+
+    async def count_leads_since(self, days: int) -> int:
+        cursor = await self._db.connection.execute(
+            "SELECT COUNT(*) AS c FROM leads WHERE created_at >= ?", (_days_ago(days),)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return int(row["c"]) if row else 0
+
+    async def all_leads(self) -> list[Lead]:
+        cursor = await self._db.connection.execute("SELECT * FROM leads ORDER BY id ASC")
         rows = await cursor.fetchall()
         await cursor.close()
         return [Lead.from_row(row) for row in rows]

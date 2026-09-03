@@ -63,3 +63,4 @@ class ToolOutcome:
     payload: dict[str, Any] = field(default_factory=dict)
     lead_id: int | None = None
     duplicate: bool = False
+    request_contact: bool = False

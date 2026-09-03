@@ -46,6 +46,16 @@ CREATE TABLE IF NOT EXISTS leads (
 );
 CREATE INDEX IF NOT EXISTS idx_leads_chat ON leads (chat_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_leads_contact ON leads (contact_normalized);
+
+-- Суточный расход вызовов LLM. Счётчик в БД, а не в памяти: рестарт
+-- контейнера не должен обнулять лимит и открывать окно для спама.
+CREATE TABLE IF NOT EXISTS usage_daily (
+    day        TEXT NOT NULL,
+    chat_id    INTEGER NOT NULL,
+    llm_calls  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, chat_id)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_day ON usage_daily (day);
 """
 
 

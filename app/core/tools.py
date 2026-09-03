@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 SAVE_LEAD_TOOL_NAME = "save_qualified_lead"
+REQUEST_PHONE_TOOL_NAME = "request_phone_button"
 
 SAVE_QUALIFIED_LEAD: dict[str, Any] = {
     "type": "function",
@@ -70,4 +71,32 @@ SAVE_QUALIFIED_LEAD: dict[str, Any] = {
     },
 }
 
-TOOLS: list[dict[str, Any]] = [SAVE_QUALIFIED_LEAD]
+REQUEST_PHONE_BUTTON: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": REQUEST_PHONE_TOOL_NAME,
+        "description": (
+            "Показать клиенту кнопку «Отправить мой номер». Номер придёт от самого "
+            "Telegram и будет подтверждён платформой — это надёжнее, чем номер, "
+            "набранный руками. Вызывай, когда пора взять контакт: клиент уже получил "
+            "пользу от разговора и известно, что и на когда ему нужно. "
+            "Если клиент предпочитает написать контакт текстом — не настаивай."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Зачем нужен контакт — одной фразой, для сообщения клиенту. "
+                        "Например: «чтобы менеджер подтвердил наличие на эти даты»."
+                    ),
+                }
+            },
+            "required": ["reason"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+TOOLS: list[dict[str, Any]] = [SAVE_QUALIFIED_LEAD, REQUEST_PHONE_BUTTON]

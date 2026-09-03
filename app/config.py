@@ -69,8 +69,32 @@ class Settings(BaseSettings):
     throttle_min_interval: float = Field(default=1.2, ge=0)
     throttle_messages_per_minute: int = Field(default=15, ge=1)
 
+    # --- Дневные лимиты расходов на LLM -------------------------------------
+    # Троттлинг ограничивает частоту, но не объём: 15 сообщений в минуту это
+    # 21 600 платных вызовов в сутки с одного аккаунта. 0 — лимит выключен.
+    daily_llm_calls_per_user: int = Field(default=60, ge=0)
+    daily_llm_calls_global: int = Field(default=3_000, ge=0)
+
     # --- Дедупликация лидов -------------------------------------------------
     lead_dedup_window_minutes: int = Field(default=180, ge=0)
+
+    # --- Хранение персональных данных ---------------------------------------
+    # 0 — хранить бессрочно (осознанное решение, а не значение по умолчанию).
+    retention_days_messages: int = Field(default=30, ge=0)
+    retention_days_leads: int = Field(default=365, ge=0)
+    retention_cleanup_hours: int = Field(default=24, ge=1)
+
+    # --- Дневные лимиты расходов на LLM -------------------------------------
+    # Троттлинг ограничивает частоту, но не общий объём: 15 сообщений в минуту
+    # это 21600 платных вызовов в сутки с одного аккаунта.
+    daily_llm_calls_per_user: int = Field(default=60, ge=0)
+    daily_llm_calls_global: int = Field(default=3000, ge=0)
+
+    # --- Хранение персональных данных ---------------------------------------
+    # 0 — не удалять никогда.
+    retention_days_messages: int = Field(default=30, ge=0)
+    retention_days_leads: int = Field(default=365, ge=0)
+    retention_interval_hours: int = Field(default=24, ge=1)
 
     # --- Профиль бизнеса (подставляется в системный промпт) -----------------
     company_name: str = "Наша компания"
