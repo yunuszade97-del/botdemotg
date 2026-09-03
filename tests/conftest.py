@@ -65,9 +65,14 @@ class FakeLLM:
 @dataclass
 class FakeNotifier:
     sent: list[Lead] = field(default_factory=list)
+    alerts: list[tuple[str, str]] = field(default_factory=list)
 
     async def notify(self, lead: Lead) -> bool:
         self.sent.append(lead)
+        return True
+
+    async def alert(self, key: str, text: str) -> bool:
+        self.alerts.append((key, text))
         return True
 
     async def flush_pending(self, limit: int = 50) -> int:

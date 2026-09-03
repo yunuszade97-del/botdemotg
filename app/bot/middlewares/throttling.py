@@ -51,7 +51,11 @@ class ThrottlingMiddleware(BaseMiddleware):
         while window and now - window[0] > 60.0:
             window.popleft()
 
-        too_fast = now - self._last_seen.get(user_id, 0.0) < self._min_interval
+        # get(...) без сентинела дал бы «0.0» как момент прошлого сообщения,
+        # а monotonic() считается от произвольной точки: сразу после старта
+        # процесса первое сообщение каждого клиента отбрасывалось бы как спам.
+        last_seen = self._last_seen.get(user_id)
+        too_fast = last_seen is not None and now - last_seen < self._min_interval
         too_many = len(window) >= self._limit
 
         if too_fast or too_many:
@@ -71,7 +75,8 @@ class ThrottlingMiddleware(BaseMiddleware):
 
     async def _maybe_warn(self, event: Message, user_id: int, now: float) -> None:
         """Предупреждаем раз в cooldown, иначе спамим в ответ на спам."""
-        if now - self._last_warned.get(user_id, 0.0) < self._warn_cooldown:
+        last_warned = self._last_warned.get(user_id)
+        if last_warned is not None and now - last_warned < self._warn_cooldown:
             return
         self._last_warned[user_id] = now
         try:

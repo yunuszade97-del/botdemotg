@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Bot, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
 from aiogram.types import ErrorEvent, Message
 
 logger = logging.getLogger(__name__)
@@ -34,9 +34,17 @@ async def on_unhandled_error(event: ErrorEvent, bot: Bot) -> bool:
     polling будет повторять его и наступит на ту же ошибку.
     """
     message = _extract_message(event)
+    chat_id = message.chat.id if message else None
+
+    # Пользователь заблокировал бота или удалил чат — это нормальная жизнь
+    # мессенджера, а не сбой. Полный стектрейс здесь только зашумляет логи.
+    if isinstance(event.exception, TelegramForbiddenError):
+        logger.info("Бот заблокирован пользователем (chat_id=%s)", chat_id)
+        return True
+
     logger.exception(
         "Необработанная ошибка (chat_id=%s): %s",
-        message.chat.id if message else None,
+        chat_id,
         event.exception,
         exc_info=event.exception,
     )

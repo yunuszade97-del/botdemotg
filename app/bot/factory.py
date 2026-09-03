@@ -11,7 +11,11 @@ from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from app.bot.handlers import build_router
-from app.bot.middlewares import LoggingMiddleware, ThrottlingMiddleware
+from app.bot.middlewares import (
+    ChatGuardMiddleware,
+    LoggingMiddleware,
+    ThrottlingMiddleware,
+)
 from app.bot.services.conversation import ConversationService
 from app.bot.services.notifier import AdminNotifier
 from app.config import Settings
@@ -49,6 +53,12 @@ def create_dispatcher(
     )
 
     dispatcher.message.middleware(LoggingMiddleware())
+    # Порядок важен: посторонние чаты отсекаются до троттлинга и хэндлеров.
+    dispatcher.message.middleware(
+        ChatGuardMiddleware(
+            admin_ids=settings.admin_ids, allow_groups=settings.allow_group_chats
+        )
+    )
     if settings.throttle_enabled:
         dispatcher.message.middleware(
             ThrottlingMiddleware(

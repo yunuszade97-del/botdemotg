@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     history_max_chars: int = Field(default=12_000, ge=1_000)
     max_user_message_chars: int = Field(default=2_000, ge=100)
 
+    # --- Доступ -------------------------------------------------------------
+    # По умолчанию бот работает только в личных чатах: в группе он отвечал бы
+    # на каждое сообщение платным вызовом LLM.
+    allow_group_chats: bool = False
+
     # --- Анти-спам ----------------------------------------------------------
     throttle_enabled: bool = True
     throttle_min_interval: float = Field(default=1.2, ge=0)

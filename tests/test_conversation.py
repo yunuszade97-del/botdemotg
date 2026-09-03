@@ -194,7 +194,7 @@ async def test_malformed_tool_arguments(make_service, repo: Repository) -> None:
 async def test_llm_failure_keeps_user_message_and_degrades_gracefully(
     make_service, repo: Repository
 ) -> None:
-    service, llm, _ = make_service([])
+    service, llm, notifier = make_service([])
 
     async def boom(*args, **kwargs):
         raise LLMError("провайдер недоступен")
@@ -203,10 +203,16 @@ async def test_llm_failure_keeps_user_message_and_degrades_gracefully(
 
     result = await service.handle_message(CTX, "Сколько стоит RAV4?")
 
+    await _drain_background_tasks()
+
     assert result.degraded is True
     assert result.reply == LLM_FAILURE_REPLY
+    # Даже в аварии предлагаем кнопку: контакт можно взять и без модели.
+    assert result.request_contact is True
     history = await repo.get_history(1, limit=10, max_chars=10_000)
     assert [(m.role, m.content) for m in history] == [("user", "Сколько стоит RAV4?")]
+    # Владелец узнаёт о поломке от бота, а не от недовольных клиентов.
+    assert [key for key, _ in notifier.alerts] == ["llm_down"]
 
 
 async def test_tool_round_limit_still_confirms_saved_lead(

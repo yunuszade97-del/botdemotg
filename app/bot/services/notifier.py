@@ -6,6 +6,8 @@ import asyncio
 import logging
 from html import escape
 
+import time
+
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 
@@ -65,10 +67,19 @@ class AdminNotifier:
     следующем старте (`flush_pending`).
     """
 
-    def __init__(self, bot: Bot, repo: Repository, admin_ids: list[int]) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        repo: Repository,
+        admin_ids: list[int],
+        *,
+        alert_cooldown: float = 900.0,
+    ) -> None:
         self._bot = bot
         self._repo = repo
         self._admin_ids = admin_ids
+        self._alert_cooldown = alert_cooldown
+        self._last_alert: dict[str, float] = {}  # ключ -> момент прошлой отправки
 
     async def notify(self, lead: Lead) -> bool:
         text = render_lead(lead)
@@ -116,4 +127,27 @@ class AdminNotifier:
         for lead in pending:
             if await self.notify(lead):
                 sent += 1
+        return sent
+
+    async def alert(self, key: str, text: str) -> bool:
+        """Технический алерт админу с защитой от лавины повторов.
+
+        Когда падает LLM, ошибка приходит на каждое сообщение каждого клиента.
+        Без дедупа админ получит сотню одинаковых сообщений и отключит
+        уведомления — ровно тогда, когда они нужнее всего.
+        """
+        now = time.monotonic()
+        # Сентинел None, а не 0.0: monotonic() отсчитывается от произвольной
+        # точки, и на свежезапущенной машине разница с нулём меньше кулдауна —
+        # первый же алерт был бы проглочен ровно тогда, когда он нужен.
+        previous = self._last_alert.get(key)
+        if previous is not None and now - previous < self._alert_cooldown:
+            return False
+        self._last_alert[key] = now
+
+        body = f"⚠️ <b>Проблема в работе бота</b>\n\n{escape(text)}"
+        sent = False
+        for admin_id in self._admin_ids:
+            if await self._send(admin_id, body):
+                sent = True
         return sent

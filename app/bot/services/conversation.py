@@ -7,7 +7,7 @@ import json
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Coroutine
 
 from pydantic import ValidationError
 
@@ -118,11 +118,22 @@ class ConversationService:
 
         try:
             reply, lead_id, wants_contact = await self._run_tool_loop(ctx, messages)
-        except LLMError:
+        except LLMError as exc:
             logger.exception("LLM недоступна для chat_id=%s", ctx.chat_id)
             # Реплику пользователя сохраняем: контекст не должен теряться из-за сбоя.
             await self._repo.add_message(ctx.chat_id, "user", user_text)
-            return TurnResult(reply=LLM_FAILURE_REPLY, degraded=True)
+            # Владелец бизнеса должен узнать о поломке от бота, а не от клиентов.
+            self._spawn(
+                self._notifier.alert(
+                    "llm_down",
+                    f"Модель {self._settings.llm_model} не отвечает: {exc}. "
+                    f"Клиенты получают извинения вместо консультаций. "
+                    f"Проверьте баланс и ключ LLM_API_KEY.",
+                )
+            )
+            return TurnResult(
+                reply=LLM_FAILURE_REPLY, degraded=True, request_contact=True
+            )
 
         # В историю пишем только текстовые ходы. Раунды с tool_calls намеренно
         # не сохраняются: assistant-сообщение с tool_calls без парного tool-ответа
@@ -278,12 +289,7 @@ class ConversationService:
 
         # Уведомление админа не должно задерживать ответ клиенту, но и потеряться
         # молча не может: при сбое лид останется в очереди недоставленных.
-        task = asyncio.create_task(self._notifier.notify(lead))
-        # asyncio держит задачи только слабой ссылкой — без этого сборщик
-        # мусора может отменить отправку лида на середине.
-        self._background.add(task)
-        task.add_done_callback(self._background.discard)
-        task.add_done_callback(_log_task_failure)
+        self._spawn(self._notifier.notify(lead))
 
         return ToolOutcome(
             payload={
@@ -327,6 +333,17 @@ class ConversationService:
             logger.error("Исчерпан ГЛОБАЛЬНЫЙ суточный лимит вызовов LLM")
             return True
         return False
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Запускает фоновую задачу, удерживая на неё сильную ссылку.
+
+        asyncio хранит задачи только слабо: без этого сборщик мусора способен
+        отменить отправку лида на середине.
+        """
+        task = asyncio.create_task(coro)
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+        task.add_done_callback(_log_task_failure)
 
     async def is_llm_unavailable(self, chat_id: int) -> bool:
         """Можно ли вообще обратиться к модели для этого чата."""
