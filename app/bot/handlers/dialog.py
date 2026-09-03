@@ -9,7 +9,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 
-from app.bot.keyboards import remove_keyboard
+from app.bot.keyboards import contact_keyboard, remove_keyboard
 from app.bot.services.conversation import ConversationService, TurnContext
 from app.config import Settings
 from app.db.crud import Repository
@@ -40,8 +40,14 @@ async def _respond(message: Message, conversation: ConversationService, text: st
     ):
         result = await conversation.handle_message(ctx, text)
 
-    # Клавиатуру с запросом контакта убираем, как только контакт получен.
-    reply_markup = remove_keyboard() if result.lead_id else None
+    # Клавиатура следует за состоянием диалога: показать кнопку, когда модель
+    # просит контакт, и убрать её, как только контакт получен.
+    if result.lead_id:
+        reply_markup = remove_keyboard()
+    elif result.request_contact:
+        reply_markup = contact_keyboard()
+    else:
+        reply_markup = None
     await message.answer(result.reply, reply_markup=reply_markup)
 
     if result.lead_id:
@@ -65,6 +71,17 @@ async def handle_contact(
     )
 
     name = " ".join(filter(None, [contact.first_name, contact.last_name])).strip()
+
+    if await conversation.is_llm_unavailable(message.chat.id):
+        # Лимит исчерпан или модель недоступна: сохраняем лид напрямую.
+        # Клиент уже прислал номер — терять его из-за отсутствия LLM нельзя.
+        result = await conversation.capture_contact_without_llm(
+            _context(message), phone=contact.phone_number, name=name
+        )
+        await message.answer(result.reply, reply_markup=remove_keyboard())
+        logger.info("Лид #%s принят без LLM (chat_id=%s)", result.lead_id, message.chat.id)
+        return
+
     # Отдаём модели как реплику клиента, чтобы она сама решила, хватает ли
     # данных для вызова save_qualified_lead.
     synthetic = (

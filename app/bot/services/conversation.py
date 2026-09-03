@@ -328,6 +328,10 @@ class ConversationService:
             return True
         return False
 
+    async def is_llm_unavailable(self, chat_id: int) -> bool:
+        """Можно ли вообще обратиться к модели для этого чата."""
+        return await self._is_over_daily_limit(chat_id)
+
     async def capture_contact_without_llm(
         self, ctx: TurnContext, *, phone: str, name: str
     ) -> TurnResult:

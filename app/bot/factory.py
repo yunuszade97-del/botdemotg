@@ -6,6 +6,7 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramAPIError
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeDefault
 
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 PUBLIC_COMMANDS = [
     BotCommand(command="start", description="Начать заново"),
     BotCommand(command="reset", description="Очистить историю диалога"),
+    BotCommand(command="forget", description="Удалить мои данные"),
     BotCommand(command="help", description="Как пользоваться ботом"),
 ]
 
@@ -83,3 +85,28 @@ async def setup_bot_commands(bot: Bot) -> None:
         await bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeDefault())
     except Exception:  # noqa: BLE001 - меню команд не критично для работы
         logger.warning("Не удалось установить меню команд", exc_info=True)
+
+
+async def verify_admin_chats(bot: Bot, admin_ids: list[int]) -> list[int]:
+    """Проверяет, что бот может писать в чаты админов.
+
+    Telegram не даёт боту написать первым тому, кто не нажимал /start.
+    Молча это выясняется в худший момент — когда придёт первый лид.
+    Возвращает список недостижимых чатов.
+    """
+    unreachable: list[int] = []
+    for admin_id in admin_ids:
+        try:
+            await bot.get_chat(admin_id)
+        except TelegramAPIError as exc:
+            unreachable.append(admin_id)
+            logger.error(
+                "Админ-чат %s недоступен (%s). Лиды туда не дойдут. "
+                "Откройте бота с этого аккаунта и нажмите /start "
+                "(для группы — добавьте бота в неё).",
+                admin_id,
+                exc,
+            )
+    if not unreachable:
+        logger.info("Все админ-чаты доступны: %s", admin_ids)
+    return unreachable

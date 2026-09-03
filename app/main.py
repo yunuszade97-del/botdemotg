@@ -26,6 +26,7 @@ from app.bot.factory import (
     create_bot,
     create_dispatcher,
     setup_bot_commands,
+    verify_admin_chats,
 )
 from app.config import Settings, get_settings
 from app.db.crud import Repository
@@ -62,9 +63,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Бот @%s запущен (id=%s)", me.username, me.id)
     await setup_bot_commands(bot)
 
+    # Недостижимый админ-чат — это молча теряемые лиды, поэтому проверяем
+    # на старте, а не в момент первой заявки.
+    with contextlib.suppress(Exception):
+        await verify_admin_chats(bot, settings.admin_ids)
+
     # Лиды, о которых админ не узнал из-за прошлого сбоя, досылаем на старте.
     with contextlib.suppress(Exception):
         await notifier.flush_pending()
+
+    retention_task = asyncio.create_task(
+        _retention_loop(repo, settings), name="retention-cleanup"
+    )
 
     polling_task: asyncio.Task | None = None
     if settings.use_webhook:
@@ -88,6 +98,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        retention_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await retention_task
         if polling_task is not None:
             await dispatcher.stop_polling()
             polling_task.cancel()
@@ -100,6 +113,29 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await bot.session.close()
         await database.close()
         logger.info("Остановка завершена")
+
+
+async def _retention_loop(repo: Repository, settings: Settings) -> None:
+    """Периодически удаляет данные старше срока хранения.
+
+    Первый проход — сразу на старте: если бот стоял выключенным, накопившееся
+    должно уйти при первом же запуске, а не через сутки работы.
+    """
+    interval = settings.retention_cleanup_hours * 3600
+    while True:
+        try:
+            messages = await repo.purge_old_messages(settings.retention_days_messages)
+            leads = await repo.purge_old_leads(settings.retention_days_leads)
+            await repo.purge_old_usage()
+            if messages or leads:
+                logger.info(
+                    "Retention: удалено сообщений=%s, заявок=%s", messages, leads
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - фоновая уборка не должна ронять бота
+            logger.exception("Ошибка очистки устаревших данных")
+        await asyncio.sleep(interval)
 
 
 router = APIRouter()
