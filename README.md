@@ -16,21 +16,26 @@ git clone <repo> && cd botdemotg
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env
+cp .env.example .env && chmod 600 .env
 # заполните BOT_TOKEN, ADMIN_CHAT_IDS, LLM_API_KEY
 
 python -m app.preflight   # можно ли запускать?
 python -m app.main
 ```
 
-`preflight` — это то, что стоит запускать перед каждым деплоем. Он проверяет
-конфиг, запись в БД, токен, **достижимость админ-чатов** и **поддержку моделью
+> **Первый запуск —** [`docs/LAUNCH.md`](docs/LAUNCH.md): пошаговый чек-лист
+> до первого пришедшего лида, с проверкой на каждом шаге и сценарием показа
+> клиенту.
+
+`preflight` стоит запускать перед каждым деплоем. Он проверяет конфиг, запись
+в БД, профиль ниши, токен, **достижимость админ-чатов** и **поддержку моделью
 tool calling**, и возвращает код 1, если запускать нельзя:
 
 ```
 [  OK  ] Конфигурация          режим polling, админов: 1
 [  OK  ] База данных           data/bot.sqlite3
-[  OK  ] База знаний           content/knowledge.md, 1993 символов
+[  OK  ] Профиль ниши          rent_car: Batumi Rent — аренда автомобилей
+[  OK  ] База знаний           content/niches/rent_car.md, 1753 символов
 [  OK  ] Telegram: токен       @your_bot (id=123456789)
 [ FAIL ] Telegram: админ-чаты  недоступны: [777]. Откройте бота с этих
                                аккаунтов и нажмите /start
@@ -54,27 +59,39 @@ tool calling**, и возвращает код 1, если запускать н
 
 ---
 
-## Как переключить бота на нового клиента
+## Ниши и переключение на нового клиента
 
-Код трогать не нужно — только два места.
-
-**1. `content/knowledge.md`** — прайс, наличие, условия, FAQ. Файл целиком
-подставляется в системный промпт. Пишите обычным текстом: чем конкретнее
-цифры и условия, тем меньше модель фантазирует.
-
-**2. Переменные в `.env`:**
+Ниша — это данные, а не код. Одна переменная в `.env` меняет название,
+направление, приветствие, прайс и **набор вопросов для квалификации**:
 
 ```dotenv
-COMPANY_NAME=Название компании
-COMPANY_BUSINESS=аренда квартир посуточно
-COMPANY_CITY=Тбилиси
-WORKING_HOURS=ежедневно 10:00–20:00
-MANAGER_RESPONSE_TIME=10 минут
-WELCOME_MESSAGE=            # пусто — сгенерируется из полей выше
+PROFILE=tours      # rent_car | real_estate | tours | ваша
 ```
 
-Сам тон и логика продаж живут в `app/core/prompts.py` — правьте, только если
-нужно поменять стиль общения, а не факты о бизнесе.
+```bash
+python -m app.profiles              # список готовых ниш
+python -m app.profiles show tours   # карточка + сценарий для демо
+python -m app.profiles prompt tours # системный промпт как его увидит модель
+```
+
+Профиль — два файла: `profiles/<имя>.toml` (кто вы и что спрашивать) и
+`content/niches/<имя>.md` (прайс и FAQ, его правит менеджер клиента).
+Ключ `qualify` вклеивается в промпт: поэтому прокату бот спрашивает стаж
+вождения, а экскурсиям — возраст детей.
+
+Один профиль обслуживает много клиентов в одной нише — любая `COMPANY_*`
+в `.env` перебивает профиль точечно:
+
+```dotenv
+PROFILE=tours
+COMPANY_NAME=Ольга Travel
+COMPANY_CITY=Тбилиси
+```
+
+Как завести свою нишу — [`docs/NICHES.md`](docs/NICHES.md).
+
+Тон и логика продаж живут в `app/core/prompts.py` и общие для всех ниш —
+правьте, только если меняете стиль общения, а не факты о бизнесе.
 
 ---
 
@@ -365,7 +382,8 @@ LEAD_WEBHOOK_SECRET=<случайная строка>
 
 ```text
 app/
-├── config.py                     # Pydantic Settings + профиль бизнеса
+├── config.py                     # Pydantic Settings, разворачивает PROFILE
+├── profiles.py                   # CLI по нишам: list / show / prompt
 ├── main.py                       # FastAPI, lifespan, webhook/polling, retention
 ├── preflight.py                  # «можно ли запускать?» — проверка перед деплоем
 ├── logging_config.py
@@ -387,6 +405,7 @@ app/
 │       └── notifier.py           # доставка лида админам
 ├── core/
 │   ├── llm_client.py             # OpenAI-совместимый клиент + ретраи
+│   ├── profile.py                # загрузка profiles/<имя>.toml
 │   ├── prompts.py                # системный промпт (шаблон)
 │   ├── tools.py                  # схемы save_qualified_lead и request_phone_button
 │   └── schemas.py                # валидация аргументов инструмента
@@ -397,10 +416,14 @@ app/
 └── utils/
     └── contacts.py               # нормализация контакта = ключ дедупа
 
-content/knowledge.md              # прайс и FAQ клиента
+profiles/*.toml                   # ниши: кто вы и что спрашивать у клиента
+content/niches/*.md               # прайс и FAQ по нишам
+content/knowledge.md              # база знаний, когда PROFILE не задан
+docs/LAUNCH.md                    # чек-лист запуска демо
+docs/NICHES.md                    # как завести свою нишу
 deploy/leadbot.service            # systemd-юнит для VPS
 deploy/backup.sh                  # согласованный бэкап SQLite
-tests/                            # 118 тестов
+tests/                            # 135 тестов
 ```
 
 ---
@@ -442,9 +465,13 @@ tool-loop (успех, невалидные аргументы, битый JSON,
 базы предыдущего релиза, деградация при недоступной LLM,
 ответ клиенту при падении хэндлера, сериализация параллельных сообщений,
 экранирование HTML в уведомлении, троттлинг, защита вебхука, `/stats`,
-`/export` и сквозной путь «сообщение → лид → уведомление».
+`/export`, профили ниш (комплектность поставляемых, приоритет `.env` над
+профилем, влияние `qualify` на промпт) и сквозной путь «сообщение → лид →
+уведомление».
 
-CI прогоняет их на Python 3.11 и 3.12 (`.github/workflows/ci.yml`).
+Тесты отвязаны от личного `.env` (`_ignore_dotenv` в `tests/conftest.py`):
+иначе поля подтягивались бы из него, и набор вёл бы себя по-разному локально
+и в CI. CI прогоняет их на Python 3.11 и 3.12 (`.github/workflows/ci.yml`).
 
 ---
 
