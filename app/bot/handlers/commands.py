@@ -13,10 +13,12 @@ from aiogram import Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import BufferedInputFile, Message
 
+from app.bot.handlers.niche import cmd_niche, show_niche_menu
 from app.bot.keyboards import contact_keyboard, remove_keyboard
 from app.bot.services.conversation import ConversationService
 from app.config import Settings
-from app.core.prompts import DEFAULT_WELCOME
+from app.core.niches import NicheRegistry
+from app.core.prompts import DEFAULT_WELCOME, NICHE_RESET_NOTICE
 from app.db.crud import Repository
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,16 @@ HELP_TEXT = (
     "Просто напишите, что вам нужно и на какие даты — я подберу варианты "
     "и передам заявку менеджеру.\n\n"
     "/start — начать заново\n"
+    "/reset — очистить историю диалога\n"
+    "/forget — удалить все мои данные\n"
+    "/help — эта подсказка"
+)
+
+HELP_TEXT_SHOWCASE = (
+    "Просто напишите, что вам нужно и на какие даты — я подберу варианты "
+    "и передам заявку менеджеру.\n\n"
+    "/start — начать заново\n"
+    "/niche — сменить направление\n"
     "/reset — очистить историю диалога\n"
     "/forget — удалить все мои данные\n"
     "/help — эта подсказка"
@@ -42,6 +54,7 @@ CSV_COLUMNS = [
     "username",
     "tg_user_id",
     "chat_id",
+    "niche",
 ]
 
 
@@ -50,6 +63,7 @@ async def cmd_start(
     settings: Settings,
     repo: Repository,
     conversation: ConversationService,
+    niches: NicheRegistry | None,
 ) -> None:
     user = message.from_user
     await repo.upsert_user(
@@ -60,6 +74,17 @@ async def cmd_start(
     )
     # /start — это «начать заново»: старый контекст только мешает.
     await conversation.reset(message.chat.id)
+
+    if niches is not None and niches.enabled:
+        # Направление тоже сбрасывается: /start начинает демо с нуля. Если
+        # ниша уже была выбрана, вместе с её приветствием висит клавиатура
+        # «Отправить мой номер» — без явного снятия она переживает сброс, и
+        # контакт может прийти уже при невыбранной нише.
+        if await repo.get_chat_profile(message.chat.id) is not None:
+            await message.answer(NICHE_RESET_NOTICE, reply_markup=remove_keyboard())
+        await repo.set_chat_profile(message.chat.id, None)
+        await show_niche_menu(message, settings, niches)
+        return
 
     welcome = settings.welcome_message.strip() or DEFAULT_WELCOME.format(
         company_name=settings.company_name,
@@ -74,8 +99,9 @@ async def cmd_reset(message: Message, conversation: ConversationService) -> None
     await message.answer("Готово, начинаем с чистого листа. Чем могу помочь? 🙂")
 
 
-async def cmd_help(message: Message) -> None:
-    await message.answer(HELP_TEXT)
+async def cmd_help(message: Message, niches: NicheRegistry | None) -> None:
+    text = HELP_TEXT_SHOWCASE if niches is not None and niches.enabled else HELP_TEXT
+    await message.answer(text)
 
 
 async def cmd_stats(message: Message, settings: Settings, repo: Repository) -> None:
@@ -144,6 +170,7 @@ async def cmd_export(message: Message, settings: Settings, repo: Repository) -> 
                 "username": lead.username or "",
                 "tg_user_id": lead.tg_user_id or "",
                 "chat_id": lead.chat_id,
+                "niche": lead.profile_slug or "",
             }
         )
 
@@ -178,6 +205,7 @@ def build_router() -> Router:
     router = Router(name="commands")
     router.message.register(cmd_start, CommandStart())
     router.message.register(cmd_reset, Command("reset"))
+    router.message.register(cmd_niche, Command("niche"))
     router.message.register(cmd_help, Command("help"))
     router.message.register(cmd_stats, Command("stats"))
     router.message.register(cmd_export, Command("export"))

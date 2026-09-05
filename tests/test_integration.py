@@ -13,13 +13,14 @@ import pytest
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import SendMessage, TelegramMethod
-from aiogram.types import Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Message, Update, User
 
 from app.bot.factory import create_dispatcher
 from app.bot.services.aggregator import MessageAggregator
 from app.bot.services.conversation import ConversationService
 from app.bot.services.notifier import AdminNotifier
 from app.config import Settings
+from app.core.niches import NicheRegistry
 from app.db.crud import Repository
 from tests.conftest import FakeLLM, FakeNotifier, text_response, tool_response
 from tests.test_conversation import VALID_ARGS
@@ -67,18 +68,25 @@ def bot(mocked_session: MockedSession) -> Bot:
 
 
 def _make_dispatcher(
-    settings: Settings, repo: Repository, bot: Bot, responses, *, aggregation_delay: float = 0.0
+    settings: Settings,
+    repo: Repository,
+    bot: Bot,
+    responses,
+    *,
+    aggregation_delay: float = 0.0,
+    niches: NicheRegistry | None = None,
 ):
     llm = FakeLLM(responses)
     notifier = FakeNotifier()
     conversation = ConversationService(
-        settings=settings, repo=repo, llm=llm, notifier=notifier  # type: ignore[arg-type]
+        settings=settings, repo=repo, llm=llm, notifier=notifier, niches=niches  # type: ignore[arg-type]
     )
     dispatcher = create_dispatcher(
         settings=settings,
         repo=repo,
         conversation=conversation,
         aggregator=MessageAggregator(delay=aggregation_delay),
+        niches=niches,
     )
     return dispatcher, llm, notifier
 
@@ -92,6 +100,30 @@ def _update(text: str, update_id: int = 1) -> Update:
             chat=Chat(id=CHAT_ID, type="private"),
             from_user=User(id=CHAT_ID, is_bot=False, first_name="Иван", username="ivan"),
             text=text,
+        ),
+    )
+
+
+def _callback_update(
+    *,
+    data: str = "cb",
+    chat_id: int = CHAT_ID,
+    chat_type: str = "private",
+    update_id: int = 1,
+) -> Update:
+    return Update(
+        update_id=update_id,
+        callback_query=CallbackQuery(
+            id=str(update_id),
+            from_user=User(id=chat_id, is_bot=False, first_name="Иван", username="ivan"),
+            chat_instance="1",
+            data=data,
+            message=Message(
+                message_id=update_id,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=chat_id, type=chat_type),
+                text="кнопка",
+            ),
         ),
     )
 

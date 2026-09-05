@@ -121,12 +121,33 @@ class Settings(BaseSettings):
     knowledge_file: Path = BASE_DIR / "content" / "knowledge.md"
     welcome_message: str = ""
 
+    # --- Режим витрины: несколько ниш в одном боте ---------------------------
+    # Список slug'ов через запятую — не list[str]: pydantic-settings разбирает
+    # поля-списки из окружения как JSON, а SHOWCASE_PROFILES=rent_car,tours в
+    # человекочитаемом виде на этом упадёт. См. admin_chat_ids/admin_ids.
+    showcase_profiles: str = ""
+    showcase_intro: str = ""
+
     # --- Логирование --------------------------------------------------------
     log_level: str = "INFO"
 
     _profile: BusinessProfile | None = PrivateAttr(default=None)
+    _showcase_niches: tuple[BusinessProfile, ...] = PrivateAttr(default=())
 
     def model_post_init(self, __context: object) -> None:
+        self._load_showcase_profiles()
+        self._expand_profile()
+
+    def _load_showcase_profiles(self) -> None:
+        """Загружает ниши витрины. Отдельно от PROFILE — они не должны мешать друг другу."""
+        slugs: list[str] = []
+        for chunk in self.showcase_profiles.split(","):
+            slug = chunk.strip()
+            if slug and slug not in slugs:
+                slugs.append(slug)
+        self._showcase_niches = tuple(load_profile(slug, base_dir=BASE_DIR) for slug in slugs)
+
+    def _expand_profile(self) -> None:
         """Разворачивает PROFILE в поля бизнес-блока.
 
         Явно заданные переменные окружения приоритетнее профиля, поэтому
@@ -157,6 +178,15 @@ class Settings(BaseSettings):
     def business_profile(self) -> BusinessProfile | None:
         """Загруженный профиль ниши либо None, если PROFILE не задан."""
         return self._profile
+
+    @property
+    def showcase_niches(self) -> tuple[BusinessProfile, ...]:
+        """Профили витрины, уже загруженные при старте — без обращения к диску."""
+        return self._showcase_niches
+
+    @property
+    def showcase_enabled(self) -> bool:
+        return bool(self._showcase_niches)
 
     @property
     def qualify_fields(self) -> tuple[str, ...]:
@@ -219,6 +249,8 @@ class Settings(BaseSettings):
         self.admin_ids  # noqa: B018 - бросит ValueError при некорректном значении
         if self.profile and self._profile is None:  # pragma: no cover - страховка
             raise ProfileError(f"профиль {self.profile!r} не загрузился")
+        if self.showcase_profiles and not self._showcase_niches:  # pragma: no cover - страховка
+            raise ProfileError(f"витрина {self.showcase_profiles!r} не загрузилась")
         if self.use_webhook and not self.webhook_base_url:
             raise ValueError("USE_WEBHOOK=true требует заполненного WEBHOOK_BASE_URL")
         if self.use_webhook and not self.webhook_base_url.startswith("https://"):

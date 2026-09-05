@@ -52,6 +52,20 @@ class Repository:
         )
         await self._db.connection.commit()
 
+    async def get_chat_profile(self, chat_id: int) -> str | None:
+        cursor = await self._db.connection.execute(
+            "SELECT profile_slug FROM users WHERE chat_id = ?", (chat_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return row["profile_slug"] if row else None
+
+    async def set_chat_profile(self, chat_id: int, slug: str | None) -> None:
+        await self._db.connection.execute(
+            "UPDATE users SET profile_slug = ? WHERE chat_id = ?", (slug, chat_id)
+        )
+        await self._db.connection.commit()
+
     # --- история диалога ----------------------------------------------------
     async def add_message(self, chat_id: int, role: str, content: str) -> None:
         await self._db.connection.execute(
@@ -143,14 +157,15 @@ class Repository:
         budget: str | None,
         summary: str,
         raw_payload: dict,
+        profile_slug: str | None = None,
     ) -> Lead:
         cursor = await self._db.connection.execute(
             """
             INSERT INTO leads (
                 chat_id, tg_user_id, username, client_name, phone_or_contact,
                 contact_normalized, dates_or_timing, service_details, budget,
-                summary, raw_payload, admin_notified, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+                summary, raw_payload, admin_notified, profile_slug, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             """,
             (
                 chat_id,
@@ -164,6 +179,7 @@ class Repository:
                 budget,
                 summary,
                 json.dumps(raw_payload, ensure_ascii=False),
+                profile_slug,
                 _utcnow(),
             ),
         )

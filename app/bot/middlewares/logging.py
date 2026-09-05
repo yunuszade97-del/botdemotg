@@ -7,9 +7,17 @@ import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_chat_id(event: TelegramObject) -> int | None:
+    if isinstance(event, Message):
+        return event.chat.id
+    if isinstance(event, CallbackQuery) and event.message is not None:
+        return event.message.chat.id
+    return None
 
 
 class LoggingMiddleware(BaseMiddleware):
@@ -20,7 +28,7 @@ class LoggingMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         started = time.perf_counter()
-        chat_id = event.chat.id if isinstance(event, Message) else None
+        chat_id = _extract_chat_id(event)
         try:
             return await handler(event, data)
         except Exception:

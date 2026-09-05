@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 
 from app.core.prompts import THROTTLE_REPLY
 
@@ -41,7 +41,7 @@ class ThrottlingMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if not isinstance(event, Message) or event.from_user is None:
+        if not isinstance(event, (Message, CallbackQuery)) or event.from_user is None:
             return await handler(event, data)
 
         user_id = event.from_user.id
@@ -65,7 +65,15 @@ class ThrottlingMiddleware(BaseMiddleware):
                 too_fast,
                 too_many,
             )
-            await self._maybe_warn(event, user_id, now)
+            warned = await self._maybe_warn(event, user_id, now)
+            if isinstance(event, CallbackQuery) and not warned:
+                # Предупреждение подавлено кулдауном, но спиннер на кнопке
+                # должен погаснуть в любом случае — иначе клиент видит
+                # зависшую загрузку у каждого лишнего тапа.
+                try:
+                    await event.answer()
+                except Exception:  # noqa: BLE001 - тост не критичен
+                    logger.debug("Не удалось закрыть спиннер после троттлинга", exc_info=True)
             return None
 
         self._last_seen[user_id] = now
@@ -73,16 +81,21 @@ class ThrottlingMiddleware(BaseMiddleware):
         self._prune(now)
         return await handler(event, data)
 
-    async def _maybe_warn(self, event: Message, user_id: int, now: float) -> None:
-        """Предупреждаем раз в cooldown, иначе спамим в ответ на спам."""
+    async def _maybe_warn(self, event: Message | CallbackQuery, user_id: int, now: float) -> bool:
+        """Предупреждаем раз в cooldown, иначе спамим в ответ на спам.
+
+        Возвращает, было ли отправлено предупреждение — вызывающий код
+        сам гасит спиннер CallbackQuery, если предупреждение подавлено.
+        """
         last_warned = self._last_warned.get(user_id)
         if last_warned is not None and now - last_warned < self._warn_cooldown:
-            return
+            return False
         self._last_warned[user_id] = now
         try:
             await event.answer(THROTTLE_REPLY)
         except Exception:  # noqa: BLE001 - предупреждение не критично
             logger.debug("Не удалось отправить предупреждение о троттлинге", exc_info=True)
+        return True
 
     def _prune(self, now: float, max_users: int = 10_000) -> None:
         """Хранилище в памяти: чистим, чтобы оно не росло бесконечно."""

@@ -21,6 +21,7 @@ from typing import Any
 
 import httpx
 
+from app.core.niches import NicheRegistry
 from app.db.crud import Repository
 from app.db.models import Lead
 
@@ -30,9 +31,17 @@ MAX_ATTEMPTS = 3
 SIGNATURE_HEADER = "X-Lead-Signature"
 
 
-def build_payload(lead: Lead, company: str) -> dict[str, Any]:
-    """Плоская и стабильная структура: её будут разбирать в no-code сервисах."""
-    return {
+def build_payload(
+    lead: Lead, company: str, *, niche_company: str | None = None
+) -> dict[str, Any]:
+    """Плоская и стабильная структура: её будут разбирать в no-code сервисах.
+
+    `niche_company` — название бизнеса направления, из которого пришёл лид, в
+    режиме витрины. Без него payload не отличается от одиночного режима: поле
+    с направлением и подмена `company` появляются, только если у лида есть
+    `profile_slug` — иначе это чужая работающая интеграция, ломать её нельзя.
+    """
+    payload: dict[str, Any] = {
         "event": "lead.created",
         "company": company,
         "lead": {
@@ -50,6 +59,11 @@ def build_payload(lead: Lead, company: str) -> dict[str, Any]:
             "telegram_username": lead.username,
         },
     }
+    if lead.profile_slug:
+        payload["lead"]["profile_slug"] = lead.profile_slug
+        if niche_company:
+            payload["company"] = niche_company
+    return payload
 
 
 def sign(body: bytes, secret: str) -> str:
@@ -69,6 +83,7 @@ class LeadWebhookSender:
         repo: Repository | None = None,
         client: httpx.AsyncClient | None = None,
         retry_base_delay: float = 1.0,
+        niches: NicheRegistry | None = None,
     ) -> None:
         self._url = url
         self._secret = secret
@@ -76,6 +91,7 @@ class LeadWebhookSender:
         self._timeout = timeout
         self._repo = repo
         self._retry_base_delay = retry_base_delay
+        self._niches = niches
         # Один долгоживущий клиент вместо клиента на запрос: переиспользуется
         # соединение, не тратится TLS-рукопожатие на каждый лид.
         self._client = client
@@ -95,12 +111,26 @@ class LeadWebhookSender:
     def enabled(self) -> bool:
         return bool(self._url)
 
+    def _niche_company(self, lead: Lead) -> str | None:
+        if lead.profile_slug is None:
+            return None
+        if self._niches is None:
+            # Витрина выключена (реестра нет вовсе) — подменять company
+            # сырым slug некому и незачем, остаётся штатное название.
+            return None
+        niche = self._niches.get(lead.profile_slug)
+        # Ниша могла пропасть из конфига, а лид с её slug — остаться в БД.
+        # flush_pending досылает такие заявки при старте: падать нельзя,
+        # деградируем до сырого slug.
+        return niche.profile.name if niche is not None else lead.profile_slug
+
     async def send(self, lead: Lead) -> bool:
         if not self.enabled:
             return False
 
         body = json.dumps(
-            build_payload(lead, self._company), ensure_ascii=False
+            build_payload(lead, self._company, niche_company=self._niche_company(lead)),
+            ensure_ascii=False,
         ).encode("utf-8")
         headers = {"Content-Type": "application/json; charset=utf-8"}
         if self._secret:

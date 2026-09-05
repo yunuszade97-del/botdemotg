@@ -72,6 +72,17 @@ class MessageAggregator:
         except Exception:  # noqa: BLE001 - задача вне цепочки хэндлеров aiogram
             logger.exception("Ошибка обработки склеенных сообщений (chat_id=%s)", chat_id)
 
+    def cancel(self, chat_id: int) -> None:
+        """Выбрасывает недоставленную очередь одного чата, без отправки.
+
+        Нужен при смене ниши: сообщение, отправленное за мгновение до
+        нажатия кнопки, не должно флашиться уже в промпт новой ниши.
+        Безопасен, если для чата нет ни таймера, ни буфера (delay=0).
+        """
+        if timer := self._timers.pop(chat_id, None):
+            timer.cancel()
+        self._buffers.pop(chat_id, None)
+
     async def close(self) -> None:
         """Отменяет незавершённые таймеры при остановке приложения."""
         for timer in list(self._timers.values()):

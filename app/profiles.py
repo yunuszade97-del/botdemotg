@@ -14,26 +14,8 @@ from __future__ import annotations
 import sys
 
 from app.config import BASE_DIR
-from app.core.profile import BusinessProfile, ProfileError, available_profiles, load_profile
-from app.core.prompts import build_system_prompt
-
-
-def _knowledge(profile: BusinessProfile) -> str:
-    try:
-        return profile.knowledge_file.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def _system_prompt(profile: BusinessProfile) -> str:
-    return build_system_prompt(
-        company_name=profile.name,
-        company_business=profile.business,
-        company_city=profile.city,
-        working_hours=profile.working_hours,
-        knowledge_base=_knowledge(profile),
-        qualify_fields=profile.qualify,
-    )
+from app.core.niches import compile_system_prompt, read_knowledge
+from app.core.profile import ProfileError, available_profiles, load_profile
 
 
 def cmd_list() -> int:
@@ -55,7 +37,7 @@ def cmd_list() -> int:
 
 def cmd_show(name: str) -> int:
     profile = load_profile(name, base_dir=BASE_DIR)
-    knowledge = _knowledge(profile)
+    knowledge = read_knowledge(profile)
     print(f"Профиль:      {profile.slug}")
     print(f"Компания:     {profile.name}")
     print(f"Направление:  {profile.business}")
@@ -81,7 +63,7 @@ def cmd_show(name: str) -> int:
 
 
 def cmd_prompt(name: str) -> int:
-    print(_system_prompt(load_profile(name, base_dir=BASE_DIR)))
+    print(compile_system_prompt(load_profile(name, base_dir=BASE_DIR)))
     return 0
 
 

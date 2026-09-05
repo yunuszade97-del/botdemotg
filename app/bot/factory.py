@@ -22,6 +22,7 @@ from app.bot.services.lead_webhook import LeadWebhookSender
 from app.bot.services.notifier import AdminNotifier
 from app.config import Settings
 from app.core.llm_client import LLMClient
+from app.core.niches import NicheRegistry
 from app.db.crud import Repository
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ PUBLIC_COMMANDS = [
     BotCommand(command="forget", description="Удалить мои данные"),
     BotCommand(command="help", description="Как пользоваться ботом"),
 ]
+
+NICHE_COMMAND = BotCommand(command="niche", description="Сменить направление")
 
 
 def create_bot(settings: Settings) -> Bot:
@@ -47,6 +50,7 @@ def create_dispatcher(
     repo: Repository,
     conversation: ConversationService,
     aggregator: MessageAggregator | None = None,
+    niches: NicheRegistry | None = None,
 ) -> Dispatcher:
     # workflow_data: aiogram отдаст эти объекты хэндлерам по имени аргумента.
     dispatcher = Dispatcher(
@@ -55,29 +59,37 @@ def create_dispatcher(
         conversation=conversation,
         aggregator=aggregator
         or MessageAggregator(delay=settings.message_aggregation_delay),
+        niches=niches,
     )
 
     dispatcher.message.middleware(LoggingMiddleware())
+    # callback_query-хэндлер появляется в дереве роутеров только при включённой
+    # витрине, а обычная (inner) middleware у aiogram срабатывает только когда
+    # хэндлер найден. Без outer_middleware эти три middleware были бы мёртвым
+    # кодом вне режима витрины.
+    dispatcher.callback_query.outer_middleware(LoggingMiddleware())
     # Порядок важен: посторонние чаты отсекаются до троттлинга и хэндлеров.
-    dispatcher.message.middleware(
-        ChatGuardMiddleware(
-            admin_ids=settings.admin_ids, allow_groups=settings.allow_group_chats
-        )
+    chat_guard = ChatGuardMiddleware(
+        admin_ids=settings.admin_ids, allow_groups=settings.allow_group_chats
     )
+    dispatcher.message.middleware(chat_guard)
+    dispatcher.callback_query.outer_middleware(chat_guard)
     if settings.throttle_enabled:
-        dispatcher.message.middleware(
-            ThrottlingMiddleware(
-                min_interval=settings.throttle_min_interval,
-                messages_per_minute=settings.throttle_messages_per_minute,
-            )
+        throttling = ThrottlingMiddleware(
+            min_interval=settings.throttle_min_interval,
+            messages_per_minute=settings.throttle_messages_per_minute,
         )
+        dispatcher.message.middleware(throttling)
+        dispatcher.callback_query.outer_middleware(throttling)
 
-    dispatcher.include_router(build_router())
+    dispatcher.include_router(
+        build_router(showcase_enabled=niches is not None and niches.enabled)
+    )
     return dispatcher
 
 
 def build_services(
-    *, settings: Settings, bot: Bot, repo: Repository
+    *, settings: Settings, bot: Bot, repo: Repository, niches: NicheRegistry | None = None
 ) -> tuple[LLMClient, AdminNotifier, LeadWebhookSender, ConversationService]:
     llm = LLMClient(
         api_key=settings.llm_api_key,
@@ -88,13 +100,14 @@ def build_services(
         timeout=settings.llm_timeout,
         max_retries=settings.llm_max_retries,
     )
-    notifier = AdminNotifier(bot=bot, repo=repo, admin_ids=settings.admin_ids)
+    notifier = AdminNotifier(bot=bot, repo=repo, admin_ids=settings.admin_ids, niches=niches)
     lead_webhook = LeadWebhookSender(
         url=settings.lead_webhook_url,
         secret=settings.lead_webhook_secret,
         company=settings.company_name,
         timeout=settings.lead_webhook_timeout,
         repo=repo,
+        niches=niches,
     )
     conversation = ConversationService(
         settings=settings,
@@ -102,13 +115,15 @@ def build_services(
         llm=llm,
         notifier=notifier,
         lead_webhook=lead_webhook,
+        niches=niches,
     )
     return llm, notifier, lead_webhook, conversation
 
 
-async def setup_bot_commands(bot: Bot) -> None:
+async def setup_bot_commands(bot: Bot, settings: Settings) -> None:
+    commands = [*PUBLIC_COMMANDS, NICHE_COMMAND] if settings.showcase_enabled else PUBLIC_COMMANDS
     try:
-        await bot.set_my_commands(PUBLIC_COMMANDS, scope=BotCommandScopeDefault())
+        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
     except Exception:  # noqa: BLE001 - меню команд не критично для работы
         logger.warning("Не удалось установить меню команд", exc_info=True)
 

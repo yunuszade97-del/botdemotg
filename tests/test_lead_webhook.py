@@ -16,12 +16,15 @@ from app.bot.services.lead_webhook import (
     build_payload,
     sign,
 )
+from app.config import BASE_DIR
+from app.core.niches import build_registry
+from app.core.profile import load_profile
 from app.db.crud import Repository
 from app.db.database import Database
 from app.db.models import Lead
 
 
-async def _make_lead(repo: Repository, chat_id: int = 1) -> Lead:
+async def _make_lead(repo: Repository, chat_id: int = 1, profile_slug: str | None = None) -> Lead:
     return await repo.create_lead(
         chat_id=chat_id,
         tg_user_id=42,
@@ -34,6 +37,7 @@ async def _make_lead(repo: Repository, chat_id: int = 1) -> Lead:
         budget="до 100 GEL",
         summary="Кроссовер на неделю",
         raw_payload={},
+        profile_slug=profile_slug,
     )
 
 
@@ -87,6 +91,96 @@ async def test_payload_keeps_cyrillic_readable(repo: Repository) -> None:
     body = json.dumps(build_payload(lead, "TestCo"), ensure_ascii=False)
 
     assert "Иван" in body
+
+
+async def test_payload_without_niche_is_unchanged(repo: Repository) -> None:
+    """Без ниши на лиде payload не должен отличаться от прежнего — чужая интеграция."""
+    lead = await _make_lead(repo)
+
+    payload = build_payload(lead, "TestCo")
+
+    assert payload["company"] == "TestCo"
+    assert "profile_slug" not in payload["lead"]
+
+
+async def test_payload_with_niche_carries_direction_and_company(repo: Repository) -> None:
+    lead = await _make_lead(repo, profile_slug="rent_car")
+
+    payload = build_payload(lead, "TestCo", niche_company="Batumi Rent")
+
+    assert payload["lead"]["profile_slug"] == "rent_car"
+    assert payload["company"] == "Batumi Rent"
+
+
+async def test_webhook_sender_uses_niche_company_from_registry(repo: Repository) -> None:
+    registry = build_registry([load_profile("rent_car", base_dir=BASE_DIR)])
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    lead = await _make_lead(repo, profile_slug="rent_car")
+    transport = httpx.MockTransport(handler)
+    sender = LeadWebhookSender(
+        url="https://hooks.example.com/lead",
+        company="TestCo",
+        repo=repo,
+        client=httpx.AsyncClient(transport=transport),
+        retry_base_delay=0.0,
+        niches=registry,
+    )
+
+    assert await sender.send(lead) is True
+
+    payload = json.loads(captured[0].content)
+    assert payload["lead"]["profile_slug"] == "rent_car"
+    assert payload["company"] == registry.get("rent_car").profile.name
+    assert payload["company"] != "TestCo"
+
+
+async def test_webhook_sender_falls_back_to_raw_slug_for_unknown_niche(repo: Repository) -> None:
+    """Ниша удалена из конфига, а старый лид с её slug остался — отправка не должна падать."""
+    registry = build_registry([load_profile("rent_car", base_dir=BASE_DIR)])
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    lead = await _make_lead(repo, profile_slug="tours_removed")
+    transport = httpx.MockTransport(handler)
+    sender = LeadWebhookSender(
+        url="https://hooks.example.com/lead",
+        company="TestCo",
+        repo=repo,
+        client=httpx.AsyncClient(transport=transport),
+        retry_base_delay=0.0,
+        niches=registry,
+    )
+
+    assert await sender.send(lead) is True
+
+    payload = json.loads(captured[0].content)
+    assert payload["lead"]["profile_slug"] == "tours_removed"
+    assert payload["company"] == "tours_removed"
+
+
+async def test_webhook_sender_keeps_company_when_niches_registry_is_absent(repo: Repository) -> None:
+    """Витрина выключена (реестра нет вовсе) — company не подменяется сырым slug."""
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200)
+
+    lead = await _make_lead(repo, profile_slug="rent_car")
+    sender = _sender(repo, handler)  # niches не передан
+
+    assert await sender.send(lead) is True
+
+    payload = json.loads(captured[0].content)
+    assert payload["company"] == "TestCo"
 
 
 async def test_signature_lets_receiver_verify_sender(repo: Repository) -> None:

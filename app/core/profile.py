@@ -40,6 +40,10 @@ class BusinessProfile:
     qualify: tuple[str, ...]
     # Примеры реплик клиента для демонстрации и ручного прогона.
     demo_script: tuple[str, ...]
+    # Человекочитаемая метка для кнопки выбора и карточки лида в режиме
+    # витрины: `business` — это фраза для промпта («аренда квартир и
+    # апартаментов»), а не то, что помещается на кнопку.
+    label: str = ""
 
 
 def profiles_dir(base_dir: Path) -> Path:
@@ -111,9 +115,11 @@ def load_profile(slug: str, *, base_dir: Path) -> BusinessProfile:
     if not knowledge_path.is_absolute():
         knowledge_path = base_dir / knowledge_path
 
+    name = _require_str(data, "name", slug, required=True)
+
     return BusinessProfile(
         slug=slug,
-        name=_require_str(data, "name", slug, required=True),
+        name=name,
         business=_require_str(data, "business", slug, required=True),
         city=_require_str(data, "city", slug, required=False),
         working_hours=_require_str(data, "working_hours", slug, required=False)
@@ -124,4 +130,5 @@ def load_profile(slug: str, *, base_dir: Path) -> BusinessProfile:
         welcome=_require_str(data, "welcome", slug, required=False),
         qualify=_string_list(data, "qualify", slug),
         demo_script=_string_list(data, "demo_script", slug),
+        label=_require_str(data, "label", slug, required=False) or name,
     )

@@ -111,6 +111,28 @@ async def test_flush_error_does_not_crash_the_loop() -> None:
     assert ok == ["следующее"]
 
 
+async def test_cancel_discards_pending_queue() -> None:
+    """Нужен при смене ниши: недоставленное сообщение не должно флашиться в новый промпт."""
+    aggregator = MessageAggregator(delay=10.0)
+    flushed: list[str] = []
+
+    async def flush(text: str) -> None:
+        flushed.append(text)
+
+    await aggregator.add(1, "не должно уйти", flush)
+    aggregator.cancel(1)
+    await asyncio.sleep(0)
+
+    assert flushed == []
+
+
+async def test_cancel_is_safe_without_pending_timer() -> None:
+    """delay=0: ни буфера, ни таймера для чата нет — cancel не должен падать."""
+    aggregator = MessageAggregator(delay=0.0)
+
+    aggregator.cancel(1)  # не должно бросить исключение
+
+
 async def test_close_cancels_pending_timers() -> None:
     aggregator = MessageAggregator(delay=10.0)
     flushed: list[str] = []

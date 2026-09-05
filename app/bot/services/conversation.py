@@ -15,9 +15,11 @@ from app.config import Settings
 from app.bot.services.lead_webhook import LeadWebhookSender
 from app.bot.services.notifier import AdminNotifier
 from app.core.llm_client import LLMClient, LLMError, ToolCall
+from app.core.niches import Niche, NicheRegistry
 from app.core.prompts import (
     ASK_CONTACT_FALLBACK,
     LLM_FAILURE_REPLY,
+    NEED_NICHE_REPLY,
     RATE_LIMIT_REPLY,
     build_system_prompt,
 )
@@ -46,6 +48,7 @@ class TurnContext:
     tg_user_id: int | None = None
     username: str | None = None
     full_name: str | None = None
+    profile_slug: str | None = None
 
 
 @dataclass(slots=True)
@@ -55,6 +58,7 @@ class TurnResult:
     degraded: bool = False
     request_contact: bool = False
     rate_limited: bool = False
+    need_niche: bool = False
 
 
 class ConversationService:
@@ -66,12 +70,14 @@ class ConversationService:
         llm: LLMClient,
         notifier: AdminNotifier,
         lead_webhook: LeadWebhookSender | None = None,
+        niches: NicheRegistry | None = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._llm = llm
         self._notifier = notifier
         self._lead_webhook = lead_webhook
+        self._niches = niches
         self._system_prompt = build_system_prompt(
             company_name=settings.company_name,
             company_business=settings.company_business,
@@ -89,6 +95,21 @@ class ConversationService:
     def system_prompt(self) -> str:
         return self._system_prompt
 
+    @property
+    def showcase_enabled(self) -> bool:
+        return self._niches is not None and self._niches.enabled
+
+    async def get_chat_niche(self, chat_id: int) -> Niche | None:
+        """Ниша, выбранная для этого чата. None, если витрина выключена или ниша не выбрана."""
+        if not self.showcase_enabled:
+            return None
+        slug = await self._repo.get_chat_profile(chat_id)
+        assert self._niches is not None
+        return self._niches.get(slug)
+
+    def _response_time(self, niche: Niche | None) -> str:
+        return niche.profile.response_time if niche is not None else self._settings.manager_response_time
+
     async def handle_message(self, ctx: TurnContext, text: str) -> TurnResult:
         async with self._locks[ctx.chat_id]:
             return await self._handle_locked(ctx, text)
@@ -96,14 +117,22 @@ class ConversationService:
     async def _handle_locked(self, ctx: TurnContext, text: str) -> TurnResult:
         user_text = text.strip()[: self._settings.max_user_message_chars]
 
+        niche: Niche | None = None
+        if self.showcase_enabled:
+            slug = await self._repo.get_chat_profile(ctx.chat_id)
+            niche = self._niches.get(slug)  # type: ignore[union-attr]
+            if niche is None:
+                # Ниша не выбрана: ни платного вызова модели, ни записи в
+                # историю — клиент не должен заплатить за случайную нишу.
+                return TurnResult(reply=NEED_NICHE_REPLY, need_niche=True)
+            ctx.profile_slug = slug
+
         if await self._is_over_daily_limit(ctx.chat_id):
             # Диалог продолжать нечем, но клиента нельзя терять: предлагаем
             # оставить номер кнопкой — этот путь не требует LLM.
             await self._repo.add_message(ctx.chat_id, "user", user_text)
             return TurnResult(
-                reply=RATE_LIMIT_REPLY.format(
-                    response_time=self._settings.manager_response_time
-                ),
+                reply=RATE_LIMIT_REPLY.format(response_time=self._response_time(niche)),
                 request_contact=True,
                 rate_limited=True,
             )
@@ -114,14 +143,15 @@ class ConversationService:
             max_chars=self._settings.history_max_chars,
         )
 
-        messages: list[dict[str, Any]] = [{"role": "system", "content": self._system_prompt}]
+        system_prompt = niche.system_prompt if niche is not None else self._system_prompt
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
         messages.extend(item.as_llm_message() for item in history)
         messages.append({"role": "user", "content": user_text})
 
         await self._repo.register_llm_call(ctx.chat_id)
 
         try:
-            reply, lead_id, wants_contact = await self._run_tool_loop(ctx, messages)
+            reply, lead_id, wants_contact = await self._run_tool_loop(ctx, messages, niche)
         except LLMError as exc:
             logger.exception("LLM недоступна для chat_id=%s", ctx.chat_id)
             # Реплику пользователя сохраняем: контекст не должен теряться из-за сбоя.
@@ -148,7 +178,7 @@ class ConversationService:
         return TurnResult(reply=reply, lead_id=lead_id, request_contact=wants_contact)
 
     async def _run_tool_loop(
-        self, ctx: TurnContext, messages: list[dict[str, Any]]
+        self, ctx: TurnContext, messages: list[dict[str, Any]], niche: Niche | None
     ) -> tuple[str, int | None, bool]:
         """Диалог с моделью с обработкой вызовов инструментов.
 
@@ -168,7 +198,7 @@ class ConversationService:
                     return reply, lead_id, wants_contact
                 # Пустой ответ после успешного инструмента — подстраховываемся шаблоном.
                 if lead_id is not None:
-                    return self._confirmation_text(), lead_id, wants_contact
+                    return self._confirmation_text(niche), lead_id, wants_contact
                 if wants_contact:
                     return ASK_CONTACT_FALLBACK, lead_id, wants_contact
                 logger.warning("Пустой ответ LLM без tool_calls (chat_id=%s)", ctx.chat_id)
@@ -176,7 +206,7 @@ class ConversationService:
 
             messages.append(response.raw_message)
             for call in response.tool_calls:
-                outcome = await self._execute_tool(ctx, call)
+                outcome = await self._execute_tool(ctx, call, niche)
                 if outcome.lead_id is not None:
                     lead_id = outcome.lead_id
                 if outcome.request_contact:
@@ -190,15 +220,17 @@ class ConversationService:
                 )
 
             if lead_id is not None and round_index == self._settings.llm_max_tool_rounds - 2:
-                messages.append({"role": "system", "content": self._followup_hint()})
+                messages.append({"role": "system", "content": self._followup_hint(niche)})
 
         logger.warning(
             "Достигнут лимит раундов инструментов (chat_id=%s)", ctx.chat_id
         )
-        fallback = self._confirmation_text() if lead_id else LLM_FAILURE_REPLY
+        fallback = self._confirmation_text(niche) if lead_id else LLM_FAILURE_REPLY
         return fallback, lead_id, wants_contact
 
-    async def _execute_tool(self, ctx: TurnContext, call: ToolCall) -> ToolOutcome:
+    async def _execute_tool(
+        self, ctx: TurnContext, call: ToolCall, niche: Niche | None
+    ) -> ToolOutcome:
         if call.name == REQUEST_PHONE_TOOL_NAME:
             return ToolOutcome(
                 payload={
@@ -248,9 +280,11 @@ class ConversationService:
                 }
             )
 
-        return await self._save_lead(ctx, lead_data)
+        return await self._save_lead(ctx, lead_data, niche)
 
-    async def _save_lead(self, ctx: TurnContext, lead_data: QualifiedLead) -> ToolOutcome:
+    async def _save_lead(
+        self, ctx: TurnContext, lead_data: QualifiedLead, niche: Niche | None
+    ) -> ToolOutcome:
         contact_normalized = lead_data.contact_normalized
 
         duplicate = await self._repo.find_recent_duplicate(
@@ -289,6 +323,7 @@ class ConversationService:
             budget=lead_data.budget,
             summary=lead_data.summary,
             raw_payload=lead_data.model_dump(),
+            profile_slug=ctx.profile_slug,
         )
 
         # Уведомление админа не должно задерживать ответ клиенту, но и потеряться
@@ -303,7 +338,7 @@ class ConversationService:
             payload={
                 "status": "saved",
                 "lead_id": lead.id,
-                "manager_response_time": self._settings.manager_response_time,
+                "manager_response_time": self._response_time(niche),
                 "hint": (
                     "Заявка сохранена и отправлена менеджеру. Подтверди это клиенту "
                     "одним коротким сообщением."
@@ -312,19 +347,32 @@ class ConversationService:
             lead_id=lead.id,
         )
 
-    def _confirmation_text(self) -> str:
-        return LEAD_CONFIRMATION_FALLBACK.format(
-            response_time=self._settings.manager_response_time
-        )
+    def _confirmation_text(self, niche: Niche | None) -> str:
+        return LEAD_CONFIRMATION_FALLBACK.format(response_time=self._response_time(niche))
 
-    def _followup_hint(self) -> str:
-        return _TOOL_FOLLOWUP_HINT.format(
-            response_time=self._settings.manager_response_time
-        )
+    def _followup_hint(self, niche: Niche | None) -> str:
+        return _TOOL_FOLLOWUP_HINT.format(response_time=self._response_time(niche))
 
     async def reset(self, chat_id: int) -> int:
         async with self._locks[chat_id]:
             return await self._repo.clear_history(chat_id)
+
+    async def switch_niche(self, chat_id: int, slug: str) -> Niche | None:
+        """Меняет нишу чата: сначала стирает историю, потом переключает профиль.
+
+        Порядок важен: при сбое между операциями безопасное состояние — старая
+        ниша с пустой историей, а не новый промпт со старой историей (модель
+        начала бы отвечать про другую нишу по старым репликам клиента).
+        """
+        if self._niches is None:
+            return None
+        niche = self._niches.get(slug)
+        if niche is None:
+            return None
+        async with self._locks[chat_id]:
+            await self._repo.clear_history(chat_id)
+            await self._repo.set_chat_profile(chat_id, slug)
+        return niche
 
 
     async def _is_over_daily_limit(self, chat_id: int) -> bool:
@@ -367,6 +415,10 @@ class ConversationService:
         что мы не можем сгенерировать ему красивый ответ.
         """
         async with self._locks[ctx.chat_id]:
+            niche = await self.get_chat_niche(ctx.chat_id)
+            if niche is not None:
+                ctx.profile_slug = niche.profile.slug
+
             history = await self._repo.get_history(
                 ctx.chat_id, limit=6, max_chars=1_000
             )
@@ -382,10 +434,10 @@ class ConversationService:
                     else "Клиент оставил номер кнопкой, диалог не состоялся."
                 ),
             )
-            outcome = await self._save_lead(ctx, lead_data)
+            outcome = await self._save_lead(ctx, lead_data, niche)
 
         return TurnResult(
-            reply=self._confirmation_text(),
+            reply=self._confirmation_text(niche),
             lead_id=outcome.lead_id,
             degraded=True,
         )

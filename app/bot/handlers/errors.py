@@ -11,7 +11,7 @@ import logging
 
 from aiogram import Bot, Router
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
-from aiogram.types import ErrorEvent, Message
+from aiogram.types import ErrorEvent
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +22,14 @@ ERROR_REPLY = (
 )
 
 
-def _extract_message(event: ErrorEvent) -> Message | None:
+def _extract_chat_id(event: ErrorEvent) -> int | None:
     update = event.update
-    return update.message or update.edited_message
+    message = update.message or update.edited_message
+    if message is not None:
+        return message.chat.id
+    if update.callback_query is not None and update.callback_query.message is not None:
+        return update.callback_query.message.chat.id
+    return None
 
 
 async def on_unhandled_error(event: ErrorEvent, bot: Bot) -> bool:
@@ -33,8 +38,8 @@ async def on_unhandled_error(event: ErrorEvent, bot: Bot) -> bool:
     Возвращает True: апдейт считается обработанным, иначе aiogram в режиме
     polling будет повторять его и наступит на ту же ошибку.
     """
-    message = _extract_message(event)
-    chat_id = message.chat.id if message else None
+    chat_id = _extract_chat_id(event)
+    callback_query = event.update.callback_query
 
     # Пользователь заблокировал бота или удалил чат — это нормальная жизнь
     # мессенджера, а не сбой. Полный стектрейс здесь только зашумляет логи.
@@ -49,14 +54,23 @@ async def on_unhandled_error(event: ErrorEvent, bot: Bot) -> bool:
         exc_info=event.exception,
     )
 
-    if message is None:
+    if chat_id is None:
         return True
 
     try:
-        await bot.send_message(message.chat.id, ERROR_REPLY)
+        await bot.send_message(chat_id, ERROR_REPLY)
     except TelegramAPIError:
         # Пользователь заблокировал бота или чат недоступен — писать некуда.
-        logger.warning("Не удалось отправить извинение в chat_id=%s", message.chat.id)
+        logger.warning("Не удалось отправить извинение в chat_id=%s", chat_id)
+
+    if callback_query is not None:
+        # Извинение ушло в чат отдельным сообщением, но кнопка у клиента
+        # так и крутится, пока спиннер не погашен явным ответом на колбэк.
+        try:
+            await bot.answer_callback_query(callback_query.id)
+        except TelegramAPIError:
+            logger.debug("Не удалось погасить спиннер callback_query", exc_info=True)
+
     return True
 
 

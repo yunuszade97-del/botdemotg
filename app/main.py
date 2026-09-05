@@ -29,6 +29,7 @@ from app.bot.factory import (
     verify_admin_chats,
 )
 from app.config import Settings, get_settings
+from app.core.niches import build_registry
 from app.db.crud import Repository
 from app.db.database import Database
 from app.logging_config import setup_logging
@@ -51,11 +52,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await database.connect()
     repo = Repository(database)
 
+    niches = build_registry(settings.showcase_niches) if settings.showcase_niches else None
+
     bot = create_bot(settings)
     llm, notifier, lead_webhook, conversation = build_services(
-        settings=settings, bot=bot, repo=repo
+        settings=settings, bot=bot, repo=repo, niches=niches
     )
-    dispatcher = create_dispatcher(settings=settings, repo=repo, conversation=conversation)
+    dispatcher = create_dispatcher(
+        settings=settings, repo=repo, conversation=conversation, niches=niches
+    )
 
     app.state.settings = settings
     app.state.bot = bot
@@ -63,7 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     me = await bot.get_me()
     logger.info("Бот @%s запущен (id=%s)", me.username, me.id)
-    await setup_bot_commands(bot)
+    await setup_bot_commands(bot, settings)
 
     # Недостижимый админ-чат — это молча теряемые лиды, поэтому проверяем
     # на старте, а не в момент первой заявки.

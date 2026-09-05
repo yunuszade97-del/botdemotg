@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS users (
     tg_user_id  INTEGER,
     username    TEXT,
     full_name   TEXT,
+    profile_slug TEXT,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS leads (
     raw_payload         TEXT NOT NULL,
     admin_notified      INTEGER NOT NULL DEFAULT 0,
     webhook_delivered   INTEGER NOT NULL DEFAULT 0,
+    profile_slug        TEXT,
     created_at          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_leads_chat ON leads (chat_id, id DESC);
@@ -63,6 +65,8 @@ CREATE INDEX IF NOT EXISTS idx_usage_day ON usage_daily (day);
 # (таблица, колонка, DDL) — применяется к БД, созданным до появления колонки.
 MIGRATIONS: list[tuple[str, str, str]] = [
     ("leads", "webhook_delivered", "webhook_delivered INTEGER NOT NULL DEFAULT 0"),
+    ("users", "profile_slug", "profile_slug TEXT"),
+    ("leads", "profile_slug", "profile_slug TEXT"),
 ]
 
 
@@ -91,6 +95,7 @@ class Lead:
     admin_notified: bool
     webhook_delivered: bool
     created_at: str
+    profile_slug: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> "Lead":
@@ -109,4 +114,5 @@ class Lead:
             admin_notified=bool(row["admin_notified"]),
             webhook_delivered=bool(row["webhook_delivered"]),
             created_at=row["created_at"],
+            profile_slug=row["profile_slug"],
         )

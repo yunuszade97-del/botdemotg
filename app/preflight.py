@@ -17,7 +17,9 @@ from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 from app.bot.factory import create_bot
+from app.bot.keyboards import NICHE_CALLBACK_PREFIX
 from app.config import BASE_DIR, Settings, get_settings
+from app.core.niches import read_knowledge
 from app.core.profile import available_profiles
 from app.core.llm_client import LLMClient, LLMError
 from app.core.tools import SAVE_LEAD_TOOL_NAME, TOOLS
@@ -212,6 +214,37 @@ async def check_lead_webhook(settings: Settings) -> CheckResult:
 
 async def check_profile(settings: Settings) -> CheckResult:
     """Профиль ниши. Тихо уехавший на чужой прайс бот выглядит рабочим."""
+    if settings.showcase_enabled:
+        lines = []
+        empty_qualify: list[str] = []
+        oversized_callback: list[str] = []
+        for niche in settings.showcase_niches:
+            lines.append(
+                f"{niche.slug}: {niche.name} — {niche.business}, "
+                f"{len(niche.qualify)} вопросов квалификации"
+            )
+            if not niche.qualify:
+                empty_qualify.append(niche.slug)
+            callback_data = f"{NICHE_CALLBACK_PREFIX}{niche.slug}"
+            if len(callback_data.encode()) > 64:
+                oversized_callback.append(niche.slug)
+        if oversized_callback:
+            return CheckResult(
+                "Профиль ниши",
+                FAIL,
+                f"slug слишком длинный для кнопки Telegram (лимит 64 байта "
+                f"callback_data): {', '.join(oversized_callback)}",
+            )
+        detail = "; ".join(lines)
+        if empty_qualify:
+            return CheckResult(
+                "Профиль ниши",
+                WARN,
+                f"{detail} — список qualify пуст у: {', '.join(empty_qualify)}, "
+                f"по этим нишам квалификация пойдёт по общей схеме",
+            )
+        return CheckResult("Профиль ниши", OK, detail)
+
     if not settings.profile:
         known = ", ".join(available_profiles(BASE_DIR)) or "нет"
         return CheckResult(
@@ -238,23 +271,51 @@ async def check_profile(settings: Settings) -> CheckResult:
     )
 
 
-async def check_knowledge(settings: Settings) -> CheckResult:
-    knowledge = settings.knowledge_base()
+def _knowledge_verdict(knowledge: str) -> str:
+    """'missing' | 'template' | 'ok' — общая эвристика для одиночного режима и витрины.
+
+    Шаблон из репозитория состоит из заголовков и html-комментариев: бот на нём
+    формально работает, но клиенту рассказать нечего.
+    """
     if not knowledge:
-        return CheckResult(
-            "База знаний",
-            WARN,
-            f"{settings.knowledge_file} пуст или не найден — "
-            f"бот не сможет называть цены и условия",
-        )
-    # Шаблон из репозитория состоит из заголовков и html-комментариев: бот на нём
-    # формально работает, но клиенту рассказать нечего.
+        return "missing"
     meaningful = [
         line
         for line in knowledge.splitlines()
         if line.strip() and not line.lstrip().startswith(("#", ">", "<!--"))
     ]
     if len(meaningful) < 5:
+        return "template"
+    return "ok"
+
+
+async def check_knowledge(settings: Settings) -> CheckResult:
+    if settings.showcase_enabled:
+        bad = []
+        for niche in settings.showcase_niches:
+            verdict = _knowledge_verdict(read_knowledge(niche))
+            if verdict != "ok":
+                bad.append(f"{niche.slug} ({verdict})")
+        if bad:
+            return CheckResult(
+                "База знаний",
+                WARN,
+                f"впишите прайс, условия и FAQ: {', '.join(bad)}",
+            )
+        return CheckResult(
+            "База знаний", OK, f"все {len(settings.showcase_niches)} ниш(и) заполнены"
+        )
+
+    knowledge = settings.knowledge_base()
+    verdict = _knowledge_verdict(knowledge)
+    if verdict == "missing":
+        return CheckResult(
+            "База знаний",
+            WARN,
+            f"{settings.knowledge_file} пуст или не найден — "
+            f"бот не сможет называть цены и условия",
+        )
+    if verdict == "template":
         return CheckResult(
             "База знаний",
             WARN,

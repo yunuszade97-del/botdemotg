@@ -11,6 +11,7 @@ import time
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramRetryAfter
 
+from app.core.niches import NicheRegistry
 from app.db.crud import Repository
 from app.db.models import Lead
 
@@ -26,7 +27,7 @@ LEAD_TEMPLATE = """\
 💰 <b>Бюджет:</b> {budget}
 📝 <b>Суть:</b> {summary}
 💬 <b>Профиль:</b> {profile}
-
+{niche_block}
 <i>Заявка #{lead_id} · {created_at}</i>"""
 
 
@@ -44,8 +45,14 @@ def _profile_link(lead: Lead) -> str:
     return " · ".join(parts) if parts else "—"
 
 
-def render_lead(lead: Lead) -> str:
-    """Готовое HTML-сообщение для админа. Все поля экранируются."""
+def render_lead(lead: Lead, *, niche_label: str | None = None) -> str:
+    """Готовое HTML-сообщение для админа. Все поля экранируются.
+
+    `niche_label` — человекочитаемая метка направления в режиме витрины.
+    Без неё карточка не отличается от одиночного режима: строка с
+    направлением попадает в сообщение, только если метка передана.
+    """
+    niche_block = f"🧭 <b>Направление:</b> {escape(niche_label)}" if niche_label else ""
     return LEAD_TEMPLATE.format(
         client_name=escape(lead.client_name),
         contact=escape(lead.phone_or_contact),
@@ -54,6 +61,7 @@ def render_lead(lead: Lead) -> str:
         budget=escape(lead.budget) if lead.budget else "не обсуждался",
         summary=escape(lead.summary),
         profile=_profile_link(lead),
+        niche_block=niche_block,
         lead_id=lead.id,
         created_at=escape(lead.created_at.replace("T", " ")),
     )
@@ -74,15 +82,30 @@ class AdminNotifier:
         admin_ids: list[int],
         *,
         alert_cooldown: float = 900.0,
+        niches: NicheRegistry | None = None,
     ) -> None:
         self._bot = bot
         self._repo = repo
         self._admin_ids = admin_ids
         self._alert_cooldown = alert_cooldown
+        self._niches = niches
         self._last_alert: dict[str, float] = {}  # ключ -> момент прошлой отправки
 
+    def _niche_label(self, lead: Lead) -> str | None:
+        if lead.profile_slug is None:
+            return None
+        if self._niches is None:
+            # Витрина выключена (реестра нет вовсе) — показывать сырой slug
+            # в карточке незачем, строка «Направление» просто не появится.
+            return None
+        niche = self._niches.get(lead.profile_slug)
+        # Ниша могла пропасть из конфига, а лид с её slug — остаться в БД.
+        # flush_pending досылает такие заявки при старте: падать нельзя,
+        # деградируем до сырого slug.
+        return niche.profile.label if niche is not None else lead.profile_slug
+
     async def notify(self, lead: Lead) -> bool:
-        text = render_lead(lead)
+        text = render_lead(lead, niche_label=self._niche_label(lead))
         delivered = False
         for admin_id in self._admin_ids:
             if await self._send(admin_id, text):
