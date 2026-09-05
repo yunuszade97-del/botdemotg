@@ -90,6 +90,10 @@ COMPANY_CITY=Тбилиси
 
 Как завести свою нишу — [`docs/NICHES.md`](docs/NICHES.md).
 
+Для демонстрации клиенту один бот умеет предлагать сразу несколько ниш на
+выбор кнопками (`SHOWCASE_PROFILES=rent_car,real_estate,tours`) — режим
+витрины описан там же, в [`docs/NICHES.md`](docs/NICHES.md).
+
 Тон и логика продаж живут в `app/core/prompts.py` и общие для всех ниш —
 правьте, только если меняете стиль общения, а не факты о бизнесе.
 
@@ -423,7 +427,7 @@ docs/LAUNCH.md                    # чек-лист запуска демо
 docs/NICHES.md                    # как завести свою нишу
 deploy/leadbot.service            # systemd-юнит для VPS
 deploy/backup.sh                  # согласованный бэкап SQLite
-tests/                            # 135 тестов
+tests/                            # 218 тестов
 ```
 
 ---
