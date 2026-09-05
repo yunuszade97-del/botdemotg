@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY content ./content
+COPY profiles ./profiles
 
 # Процесс не должен работать от root: пробой в зависимости не должен давать
 # прав на всю файловую систему контейнера.

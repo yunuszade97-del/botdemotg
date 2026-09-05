@@ -8,6 +8,8 @@ services:
     volumes:
       # Прайс и FAQ правятся без пересборки образа.
       - ./content:/app/content:ro
+      # Профиль клиента (название, вопросы квалификации, витрина) — так же.
+      - ./profiles:/app/profiles:ro
       - bot-data:/app/data
     environment:
       DB_PATH: /app/data/bot.sqlite3
