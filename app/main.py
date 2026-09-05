@@ -17,6 +17,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+from aiogram import Bot, Dispatcher
 from aiogram.types import Update
 from fastapi import APIRouter, FastAPI, Header, Request, Response, status
 from pydantic import ValidationError
@@ -48,84 +49,153 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     setup_logging(settings.log_level)
     settings.validate_runtime()
 
-    database = Database(settings.db_path)
-    await database.connect()
-    repo = Repository(database)
+    # Всё, что открыто на старте, закрывается через стек, поэтому провал на
+    # середине инициализации освобождает ресурсы так же, как штатная остановка.
+    # Это не аккуратность ради аккуратности: aiosqlite обслуживает соединение
+    # НЕ-демоническим потоком, и незакрытая база держит интерпретатор после
+    # «Application startup failed. Exiting.» — процесс остаётся жив навсегда,
+    # порт не слушает, а systemd/Docker/панель видят живой процесс и не
+    # перезапускают его. Бот лежит молча, и в логах только одна строка.
+    async with contextlib.AsyncExitStack() as stack:
+        try:
+            database = Database(settings.db_path)
+            await database.connect()
+            stack.push_async_callback(database.close)
+            repo = Repository(database)
 
-    niches = build_registry(settings.showcase_niches) if settings.showcase_niches else None
+            niches = (
+                build_registry(settings.showcase_niches) if settings.showcase_niches else None
+            )
 
-    bot = create_bot(settings)
-    llm, notifier, lead_webhook, conversation = build_services(
-        settings=settings, bot=bot, repo=repo, niches=niches
-    )
-    dispatcher = create_dispatcher(
-        settings=settings, repo=repo, conversation=conversation, niches=niches
-    )
+            bot = create_bot(settings)
+            stack.push_async_callback(bot.session.close)
 
-    app.state.settings = settings
-    app.state.bot = bot
-    app.state.dispatcher = dispatcher
+            llm, notifier, lead_webhook, conversation = build_services(
+                settings=settings, bot=bot, repo=repo, niches=niches
+            )
+            stack.push_async_callback(llm.close)
+            stack.push_async_callback(lead_webhook.close)
 
-    me = await bot.get_me()
-    logger.info("Бот @%s запущен (id=%s)", me.username, me.id)
-    await setup_bot_commands(bot, settings)
+            dispatcher = create_dispatcher(
+                settings=settings, repo=repo, conversation=conversation, niches=niches
+            )
+            stack.push_async_callback(dispatcher.workflow_data["aggregator"].close)
 
-    # Недостижимый админ-чат — это молча теряемые лиды, поэтому проверяем
-    # на старте, а не в момент первой заявки.
-    with contextlib.suppress(Exception):
-        await verify_admin_chats(bot, settings.admin_ids)
+            app.state.settings = settings
+            app.state.bot = bot
+            app.state.dispatcher = dispatcher
 
-    # Лиды, о которых админ не узнал из-за прошлого сбоя, досылаем на старте.
-    with contextlib.suppress(Exception):
-        await notifier.flush_pending()
-    if lead_webhook.enabled:
-        logger.info("Выгрузка лидов включена: %s", settings.lead_webhook_url)
-        with contextlib.suppress(Exception):
-            await lead_webhook.flush_pending()
+            me = await bot.get_me()
+            logger.info("Бот @%s запущен (id=%s)", me.username, me.id)
+            await setup_bot_commands(bot, settings)
 
-    retention_task = asyncio.create_task(
-        _retention_loop(repo, settings), name="retention-cleanup"
-    )
-
-    polling_task: asyncio.Task | None = None
-    if settings.use_webhook:
-        await bot.set_webhook(
-            url=settings.webhook_url,
-            secret_token=settings.effective_webhook_secret,
-            drop_pending_updates=settings.drop_pending_updates,
-            allowed_updates=dispatcher.resolve_used_update_types(),
-        )
-        logger.info("Webhook установлен: %s", settings.webhook_url)
-    else:
-        await bot.delete_webhook(drop_pending_updates=settings.drop_pending_updates)
-        polling_task = asyncio.create_task(
-            dispatcher.start_polling(
-                bot, allowed_updates=dispatcher.resolve_used_update_types()
-            ),
-            name="telegram-polling",
-        )
-        logger.info("Режим long polling запущен")
-
-    try:
-        yield
-    finally:
-        retention_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await retention_task
-        if polling_task is not None:
-            await dispatcher.stop_polling()
-            polling_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await polling_task
-        if settings.use_webhook:
+            # Недостижимый админ-чат — это молча теряемые лиды, поэтому проверяем
+            # на старте, а не в момент первой заявки.
             with contextlib.suppress(Exception):
-                await bot.delete_webhook()
-        await dispatcher.workflow_data["aggregator"].close()
-        await llm.close()
-        await lead_webhook.close()
-        await bot.session.close()
-        await database.close()
-        logger.info("Остановка завершена")
+                await verify_admin_chats(bot, settings.admin_ids)
+
+            # Лиды, о которых админ не узнал из-за прошлого сбоя, досылаем на старте.
+            with contextlib.suppress(Exception):
+                await notifier.flush_pending()
+            if lead_webhook.enabled:
+                logger.info("Выгрузка лидов включена: %s", settings.lead_webhook_url)
+                with contextlib.suppress(Exception):
+                    await lead_webhook.flush_pending()
+
+            retention_task = asyncio.create_task(
+                _retention_loop(repo, settings), name="retention-cleanup"
+            )
+            stack.push_async_callback(_cancel_task, retention_task)
+
+            if settings.use_webhook:
+                await bot.set_webhook(
+                    url=settings.webhook_url,
+                    secret_token=settings.effective_webhook_secret,
+                    drop_pending_updates=settings.drop_pending_updates,
+                    allowed_updates=dispatcher.resolve_used_update_types(),
+                )
+                stack.push_async_callback(_drop_webhook, bot)
+                logger.info("Webhook установлен: %s", settings.webhook_url)
+            else:
+                await bot.delete_webhook(drop_pending_updates=settings.drop_pending_updates)
+                polling_task = asyncio.create_task(
+                    dispatcher.start_polling(
+                        bot,
+                        allowed_updates=dispatcher.resolve_used_update_types(),
+                        # Сигналы остаются за uvicorn. aiogram по умолчанию
+                        # вешает свои обработчики SIGTERM/SIGINT через
+                        # loop.add_signal_handler, а тот не добавляет обработчик,
+                        # а ЗАМЕНЯЕТ поставленный uvicorn. Тогда SIGTERM
+                        # останавливает только polling: uvicorn не узнаёт, что
+                        # пора выключаться, и процесс живёт дальше с оглохшим
+                        # ботом, пока супервизор не добьёт его по таймауту.
+                        handle_signals=False,
+                        # Сессию закрывает стек выше — иначе aiogram закроет её
+                        # у ещё работающего приложения.
+                        close_bot_session=False,
+                    ),
+                    name="telegram-polling",
+                )
+                # Упавший polling не роняет ни uvicorn, ни процесс: без этого
+                # исключение оседает в задаче и не попадает даже в лог.
+                polling_task.add_done_callback(_log_polling_exit)
+                app.state.polling_task = polling_task
+                stack.push_async_callback(_stop_polling, dispatcher, polling_task)
+                logger.info("Режим long polling запущен")
+        except Exception:
+            # Без exc_info: трассировку следом печатает uvicorn, дублировать её
+            # незачем — здесь нужна строка, объясняющая, куда смотреть.
+            logger.error(
+                "Старт не удался, процесс завершается. Частые причины: "
+                "недействительный BOT_TOKEN, недоступный api.telegram.org, "
+                "ошибка в .env или в профиле ниши."
+            )
+            raise
+
+        yield
+
+    logger.info("Остановка завершена")
+
+
+async def _cancel_task(task: asyncio.Task) -> None:
+    """Отменяет фоновую задачу и дожидается её конца, не роняя остановку."""
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 - о падении задачи уже сообщил её колбэк
+        logger.debug("Задача %s завершилась с ошибкой", task.get_name(), exc_info=True)
+
+
+async def _stop_polling(dispatcher: Dispatcher, task: asyncio.Task) -> None:
+    # Штатная остановка — не отказ, поэтому колбэк снимаем до неё.
+    task.remove_done_callback(_log_polling_exit)
+    if not task.done():
+        # RuntimeError — если polling уже остановился сам; на остановке это
+        # не новость, а шум.
+        with contextlib.suppress(RuntimeError):
+            await dispatcher.stop_polling()
+    await _cancel_task(task)
+
+
+async def _drop_webhook(bot: Bot) -> None:
+    with contextlib.suppress(Exception):
+        await bot.delete_webhook()
+
+
+def _log_polling_exit(task: asyncio.Task) -> None:
+    """Polling, завершившийся сам по себе, — это оглохший бот.
+
+    Процесс при этом жив, порт слушает, healthcheck зелёный. Без явной записи
+    в лог такой отказ выглядит как «бот молчит без причины».
+    """
+    if task.cancelled():
+        return
+    if exc := task.exception():
+        logger.error("Polling остановлен с ошибкой: %s", exc, exc_info=exc)
+    else:
+        logger.error("Polling остановлен — бот больше не получает апдейты")
 
 
 async def _retention_loop(repo: Repository, settings: Settings) -> None:
@@ -155,10 +225,17 @@ router = APIRouter()
 
 
 @router.get("/healthz")
-async def healthz() -> dict[str, str]:
+async def healthz(request: Request, response: Response) -> dict[str, str]:
     settings: Settings = get_settings()
+    # Живой процесс не равен работающему боту: polling может умереть, оставив
+    # HTTP-сервер отвечать «ok». Такой ответ — ложь, из-за которой ни панель,
+    # ни внешний мониторинг не видят, что бот перестал получать апдейты.
+    polling: asyncio.Task | None = getattr(request.app.state, "polling_task", None)
+    polling_alive = polling is None or not polling.done()
+    if not polling_alive:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {
-        "status": "ok",
+        "status": "ok" if polling_alive else "degraded",
         "mode": "webhook" if settings.use_webhook else "polling",
         "model": settings.llm_model,
     }
